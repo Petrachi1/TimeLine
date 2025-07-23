@@ -9,6 +9,9 @@ from dash import ctx
 arquivo = "Linha do tempo.xlsx"
 df = pd.read_excel(arquivo, sheet_name="Plan1")
 
+# Crie coluna de equipamento formatado
+df["Equipamento"] = df["Código Equipamento"].astype(str) + " - " + df["Descrição do Equipamento"]
+
 # Função para classificar tipo
 def classifica_tipo(row):
     desc = str(row["Descrição da Operação"]).strip().upper()
@@ -91,11 +94,12 @@ app.layout = html.Div([
     html.H2("Linha do Tempo dos Operadores"),
     html.Div([
         dcc.Dropdown(
-            id="operador-dropdown",
-            options=[{"label": nome, "value": nome} for nome in sorted(df["Nome"].unique())],
-            value=df["Nome"].unique()[0],
-            style={"width": "300px", "margin-right": "20px"}
+            id="equipamento-dropdown",
+            options=[{"label": eq, "value": eq} for eq in sorted(df["Equipamento"].unique())],
+            value=sorted(df["Equipamento"].unique())[0],
+            style={"width": "350px", "margin-right": "20px"}
         ),
+        dcc.Dropdown(id="operador-dropdown", style={"width": "300px", "margin-right": "20px"}),
         dcc.Dropdown(id="data-dropdown", style={"width": "200px"}),
         html.Button("Retroceder 1 dia", id="retroceder-dia", n_clicks=0,
             style={
@@ -109,21 +113,36 @@ app.layout = html.Div([
     dcc.Graph(id="grafico-linha-tempo")
 ])
 
+# Dropdown de operador depende do equipamento selecionado
+@app.callback(
+    Output("operador-dropdown", "options"),
+    Output("operador-dropdown", "value"),
+    Input("equipamento-dropdown", "value"),
+)
+def atualizar_operadores(equipamento):
+    operadores = df[df["Equipamento"] == equipamento]["Nome"].unique()
+    opcoes = [{"label": nome, "value": nome} for nome in sorted(operadores)]
+    valor = sorted(operadores)[0] if len(operadores) > 0 else None
+    return opcoes, valor
+
+# Dropdown de data depende de operador e equipamento
 @app.callback(
     Output("data-dropdown", "options"),
     Output("data-dropdown", "value"),
+    Input("equipamento-dropdown", "value"),
     Input("operador-dropdown", "value"),
     Input("retroceder-dia", "n_clicks"),
     State("data-dropdown", "value"),
     prevent_initial_call=False
 )
-def atualizar_datas(operador, n_clicks, data_atual):
-    datas_disponiveis = df[df["Nome"] == operador]["Data Hora Local"].dt.date.unique()
+def atualizar_datas(equipamento, operador, n_clicks, data_atual):
+    filtro = (df["Nome"] == operador) & (df["Equipamento"] == equipamento)
+    datas_disponiveis = df[filtro]["Data Hora Local"].dt.date.unique()
     datas_ordenadas = sorted(datas_disponiveis)
     opcoes = [{"label": str(data), "value": str(data)} for data in datas_ordenadas]
 
     # Se for a primeira vez, traz o D-1
-    if ctx.triggered_id == "operador-dropdown" or n_clicks == 0:
+    if ctx.triggered_id in ("operador-dropdown", "equipamento-dropdown") or n_clicks == 0:
         if len(datas_ordenadas) >= 2:
             valor_padrao = str(datas_ordenadas[-2])
         elif len(datas_ordenadas) == 1:
@@ -144,24 +163,23 @@ def atualizar_datas(operador, n_clicks, data_atual):
 
     return opcoes, data_atual
 
+# Gera o gráfico
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Output("stats-div", "children"),
+    Input("equipamento-dropdown", "value"),
     Input("operador-dropdown", "value"),
     Input("data-dropdown", "value")
 )
-def atualizar_grafico(operador, data_str):
-    if not operador or not data_str:
+def atualizar_grafico(equipamento, operador, data_str):
+    if not equipamento or not operador or not data_str:
         return {}, ""
     data = pd.to_datetime(data_str).date()
-
-    # Filtra operador e data, mas NÃO remove "FINAL DE EXPEDIENTE" ainda!
-    dff_raw = df[(df["Nome"] == operador) & (df["Data Hora Local"].dt.date == data)].copy()
+    filtro = (df["Nome"] == operador) & (df["Equipamento"] == equipamento) & (df["Data Hora Local"].dt.date == data)
+    dff_raw = df[filtro].copy()
 
     # Agrupa as operações (incluindo FINAL DE EXPEDIENTE)
     dff = agrupar_paradas(dff_raw)
-
-    # Agora sim: remove FINAL DE EXPEDIENTE do resultado agrupado
     dff = dff[dff["Descrição da Operação"].str.strip().str.upper() != "FINAL DE EXPEDIENTE"]
 
     dff["Resumo"] = (
@@ -255,7 +273,6 @@ def atualizar_grafico(operador, data_str):
     fig.update_xaxes(showgrid=False)
 
     return fig, stats_html
-
 
 if __name__ == "__main__":
     print("Iniciando Dash...")
