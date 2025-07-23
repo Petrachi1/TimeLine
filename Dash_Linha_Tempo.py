@@ -56,10 +56,13 @@ def classifica_tipo_parada(row):
         "AGUARDANDO COMBUSTIVEL", "AGUARDANDO ORDENS", 
         "AGUARDANDO MOVIMENTACAO PIVO", "FALTA DE INSUMOS"
     ]
+    essenciais = [
+        "REFEICAO", "BANHEIRO"
+    ]
     # Paradas Mecânicas
     mecanicas = [
         "AGUARDANDO MECANICO", "BORRACHARIA", "EXCESSO DE TEMPERATURA DO MOTOR", 
-        "IMPLEMENTO QUEBRADO", "MANUTENCAO ELETRICA", "MANUTENÇÃO MECANICA",
+        "IMPLEMENTO QUEBRADO", "MANUTENCAO ELETRICA", "MANUTENCAO MECANICA",
         "TRATOR QUEBRADO", "SEM SINAL GPS"
     ]
     if grupo == "PRODUTIVA":
@@ -69,8 +72,8 @@ def classifica_tipo_parada(row):
             return "Parada Gerenciável"
         elif desc in mecanicas:
             return "Parada Mecânica"
-        elif desc == "REFEICAO":
-            return "Refeição"
+        elif desc in essenciais:
+            return "Parada Essencial"
         elif desc == "OUTROS":
             return "Outros"
         else:
@@ -231,7 +234,7 @@ def atualizar_grafico(operador, equipamento, data_str):
         "Parada Gerenciável": "#FF4800",
         "Parada Mecânica": "#FF9100",
         "Parada Improdutiva": "#FF0000",
-        "Refeição": "#0026FF",
+        "Parada Essencial": "#0026FF",
         "Deslocamento": "#ffee00",
         "Manobra": "#93c9f7",
         "Outros": "#8C8C8C",
@@ -244,7 +247,7 @@ def atualizar_grafico(operador, equipamento, data_str):
     parada_gerenciavel = dff[dff["Tipo Parada"] == "Parada Gerenciável"]["Duracao Min"].sum() / 60
     parada_mecanica = dff[dff["Tipo Parada"] == "Parada Mecânica"]["Duracao Min"].sum() / 60
     parada_improdutiva = dff[dff["Tipo Parada"] == "Parada Improdutiva"]["Duracao Min"].sum() / 60
-    refeicao = dff[dff["Tipo Parada"] == "Refeição"]["Duracao Min"].sum() / 60
+    parada_essencial = dff[dff["Tipo Parada"] == "Parada Essencial"]["Duracao Min"].sum() / 60
     deslocamento = dff[dff["Tipo Parada"] == "Deslocamento"]["Duracao Min"].sum() / 60
     manobra = dff[dff["Tipo Parada"] == "Manobra"]["Duracao Min"].sum() / 60
     outros = dff[dff["Tipo Parada"] == "Outros"]["Duracao Min"].sum() / 60
@@ -264,8 +267,8 @@ def atualizar_grafico(operador, equipamento, data_str):
         html.Span(f"{parada_mecanica:.2f}h", style={"margin-right":"18px", "color":"#FF9100"}),
         html.Span("Parada Improdutiva: ", style={"color":"#DB3B13", "font-weight":"bold"}),
         html.Span(f"{parada_improdutiva:.2f}h", style={"margin-right":"18px", "color":"#FF0000"}),
-        html.Span("Refeição: ", style={"color":"#0026FF", "font-weight":"bold"}),
-        html.Span(f"{refeicao:.2f}h", style={"margin-right":"18px", "color":"#0026FF"}),
+        html.Span("Parada Essencial: ", style={"color":"#0026FF", "font-weight":"bold"}),
+        html.Span(f"{parada_essencial:.2f}h", style={"margin-right":"18px", "color":"#0026FF"}),
         html.Span("Deslocamento: ", style={"color":"#ffee00", "font-weight":"bold"}),
         html.Span(f"{deslocamento:.2f}h", style={"margin-right":"18px", "color":"#ffee00"}),
         html.Span("Manobra: ", style={"color":"#93c9f7", "font-weight":"bold"}),
