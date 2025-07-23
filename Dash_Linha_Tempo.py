@@ -12,7 +12,7 @@ df = pd.read_excel(arquivo, sheet_name="Plan1")
 # Crie coluna de equipamento formatado
 df["Equipamento"] = df["Código Equipamento"].astype(str) + " - " + df["Descrição do Equipamento"]
 
-# Função para classificar tipo
+# Função para classificar tipo principal
 def classifica_tipo(row):
     desc = str(row["Descrição da Operação"]).strip().upper()
     grupo = str(row["Descrição do Grupo da Operação"]).strip().upper()
@@ -47,6 +47,44 @@ df["Resumo"] = (
 df["Inicio"] = df.apply(lambda row: pd.to_datetime(f"{row['Data Hora Local'].date()} {row['Hora Inicial']}"), axis=1)
 df["Fim"] = df.apply(lambda row: pd.to_datetime(f"{row['Data Hora Local'].date()} {row['Hora Final']}"), axis=1)
 
+# Função para classificar manualmente as improdutivas
+def classifica_tipo_parada(row):
+    grupo = str(row["Descrição do Grupo da Operação"]).strip().upper()
+    desc = str(row["Descrição da Operação"]).strip().upper()
+    # Paradas Gerenciáveis
+    gerenciaveis = [
+        "AGUARDANDO COMBUSTIVEL", "AGUARDANDO ORDENS", 
+        "AGUARDANDO MOVIMENTACAO PIVO", "FALTA DE INSUMOS"
+    ]
+    # Paradas Mecânicas
+    mecanicas = [
+        "AGUARDANDO MECANICO", "BORRACHARIA", "EXCESSO DE TEMPERATURA DO MOTOR", 
+        "IMPLEMENTO QUEBRADO", "MANUTENCAO ELETRICA", "MANUTENÇÃO MECANICA",
+        "TRATOR QUEBRADO", "SEM SINAL GPS"
+    ]
+    if grupo == "PRODUTIVA":
+        return "Efetivo"
+    elif grupo == "IMPRODUTIVA":
+        if desc in gerenciaveis:
+            return "Parada Gerenciável"
+        elif desc in mecanicas:
+            return "Parada Mecânica"
+        elif desc == "REFEICAO":
+            return "Refeição"
+        elif desc == "OUTROS":
+            return "Outros"
+        else:
+            return "Parada Improdutiva"
+    elif desc == "DESLOCAMENTO":
+        return "Deslocamento"
+    elif desc == "MANOBRA":
+        return "Manobra"
+    else:
+        return "Outro"
+
+# Adiciona a nova coluna manual
+df["Tipo Parada"] = df.apply(classifica_tipo_parada, axis=1)
+
 # FUNÇÃO DE AGRUPAMENTO
 def agrupar_paradas(df_filtrado):
     df_filtrado = df_filtrado.sort_values(by="Inicio").reset_index(drop=True).copy()
@@ -58,7 +96,7 @@ def agrupar_paradas(df_filtrado):
         fim_bloco = atual["Fim"]
         operacao = atual["Descrição da Operação"]
         nome = atual["Nome"]
-        tipo = atual["Tipo"]
+        tipo = atual["Tipo Parada"]
 
         j = i + 1
         while j < len(df_filtrado):
@@ -80,7 +118,7 @@ def agrupar_paradas(df_filtrado):
             "Fim": fim_bloco,
             "Descrição da Operação": operacao,
             "Duracao Min": duracao_bloco,
-            "Tipo": tipo,
+            "Tipo Parada": tipo,
         }
         agrupados.append(novo_bloco)
         i = j
@@ -94,12 +132,12 @@ app.layout = html.Div([
     html.H2("Linha do Tempo dos Operadores"),
     html.Div([
         dcc.Dropdown(
-            id="equipamento-dropdown",
-            options=[{"label": eq, "value": eq} for eq in sorted(df["Equipamento"].unique())],
-            value=sorted(df["Equipamento"].unique())[0],
-            style={"width": "350px", "margin-right": "20px"}
+            id="operador-dropdown",
+            options=[{"label": nome, "value": nome} for nome in sorted(df["Nome"].unique())],
+            value=sorted(df["Nome"].unique())[0],
+            style={"width": "300px", "margin-right": "20px"}
         ),
-        dcc.Dropdown(id="operador-dropdown", style={"width": "300px", "margin-right": "20px"}),
+        dcc.Dropdown(id="equipamento-dropdown", style={"width": "350px", "margin-right": "20px"}),
         dcc.Dropdown(id="data-dropdown", style={"width": "200px"}),
         html.Button("Retroceder 1 dia", id="retroceder-dia", n_clicks=0,
             style={
@@ -113,35 +151,34 @@ app.layout = html.Div([
     dcc.Graph(id="grafico-linha-tempo")
 ])
 
-# Dropdown de operador depende do equipamento selecionado
+# Dropdown de equipamento depende do operador selecionado
 @app.callback(
-    Output("operador-dropdown", "options"),
-    Output("operador-dropdown", "value"),
-    Input("equipamento-dropdown", "value"),
+    Output("equipamento-dropdown", "options"),
+    Output("equipamento-dropdown", "value"),
+    Input("operador-dropdown", "value"),
 )
-def atualizar_operadores(equipamento):
-    operadores = df[df["Equipamento"] == equipamento]["Nome"].unique()
-    opcoes = [{"label": nome, "value": nome} for nome in sorted(operadores)]
-    valor = sorted(operadores)[0] if len(operadores) > 0 else None
+def atualizar_equipamentos(operador):
+    equipamentos = df[df["Nome"] == operador]["Equipamento"].unique()
+    opcoes = [{"label": eq, "value": eq} for eq in sorted(equipamentos)]
+    valor = sorted(equipamentos)[0] if len(equipamentos) > 0 else None
     return opcoes, valor
 
 # Dropdown de data depende de operador e equipamento
 @app.callback(
     Output("data-dropdown", "options"),
     Output("data-dropdown", "value"),
-    Input("equipamento-dropdown", "value"),
     Input("operador-dropdown", "value"),
+    Input("equipamento-dropdown", "value"),
     Input("retroceder-dia", "n_clicks"),
     State("data-dropdown", "value"),
     prevent_initial_call=False
 )
-def atualizar_datas(equipamento, operador, n_clicks, data_atual):
+def atualizar_datas(operador, equipamento, n_clicks, data_atual):
     filtro = (df["Nome"] == operador) & (df["Equipamento"] == equipamento)
     datas_disponiveis = df[filtro]["Data Hora Local"].dt.date.unique()
     datas_ordenadas = sorted(datas_disponiveis)
     opcoes = [{"label": str(data), "value": str(data)} for data in datas_ordenadas]
 
-    # Se for a primeira vez, traz o D-1
     if ctx.triggered_id in ("operador-dropdown", "equipamento-dropdown") or n_clicks == 0:
         if len(datas_ordenadas) >= 2:
             valor_padrao = str(datas_ordenadas[-2])
@@ -151,7 +188,6 @@ def atualizar_datas(equipamento, operador, n_clicks, data_atual):
             valor_padrao = None
         return opcoes, valor_padrao
 
-    # Se clicar no botão
     if ctx.triggered_id == "retroceder-dia":
         datas_str = [str(d) for d in datas_ordenadas]
         if data_atual in datas_str:
@@ -167,24 +203,23 @@ def atualizar_datas(equipamento, operador, n_clicks, data_atual):
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Output("stats-div", "children"),
-    Input("equipamento-dropdown", "value"),
     Input("operador-dropdown", "value"),
+    Input("equipamento-dropdown", "value"),
     Input("data-dropdown", "value")
 )
-def atualizar_grafico(equipamento, operador, data_str):
-    if not equipamento or not operador or not data_str:
+def atualizar_grafico(operador, equipamento, data_str):
+    if not operador or not equipamento or not data_str:
         return {}, ""
     data = pd.to_datetime(data_str).date()
     filtro = (df["Nome"] == operador) & (df["Equipamento"] == equipamento) & (df["Data Hora Local"].dt.date == data)
     dff_raw = df[filtro].copy()
 
-    # Agrupa as operações (incluindo FINAL DE EXPEDIENTE)
     dff = agrupar_paradas(dff_raw)
     dff = dff[dff["Descrição da Operação"].str.strip().str.upper() != "FINAL DE EXPEDIENTE"]
 
     dff["Resumo"] = (
         "Operador: " + dff["Nome"] +
-        "<br>Tipo: " + dff["Tipo"] +
+        "<br>Tipo: " + dff["Tipo Parada"] +
         "<br>Operação: " + dff["Descrição da Operação"] +
         "<br>Início: " + dff["Inicio"].astype(str) +
         "<br>Fim: " + dff["Fim"].astype(str) +
@@ -192,18 +227,28 @@ def atualizar_grafico(equipamento, operador, data_str):
     )
 
     cores = {
-        "Produtiva": "#046414",        # Verde
-        "Improdutiva": "#DB3B13",      # Laranja 
-        "Deslocamento": "#eebf02",     # Amarelo 
-        "Manobra": "#93c9f7",          # Azul bebê
-        "Outro": "#111111"             # Preto
+        "Efetivo": "#046414",
+        "Parada Gerenciável": "#FFC300",
+        "Parada Mecânica": "#C70039",
+        "Parada Improdutiva": "#DB3B13",
+        "Refeição": "#29648A",
+        "Deslocamento": "#eebf02",
+        "Manobra": "#93c9f7",
+        "Outros": "#8C8C8C",
+        "Outro": "#222"
     }
 
     total_horas = dff["Duracao Min"].sum() / 60
-    produtivo = dff[dff["Tipo"] == "Produtiva"]["Duracao Min"].sum() / 60
-    improdutivo = dff[dff["Tipo"] == "Improdutiva"]["Duracao Min"].sum() / 60
-    deslocamento = dff[dff["Tipo"] == "Deslocamento"]["Duracao Min"].sum() / 60
-    manobra = dff[dff["Tipo"] == "Manobra"]["Duracao Min"].sum() / 60
+    # Se quiser detalhar cada tipo:
+    efetivo = dff[dff["Tipo Parada"] == "Efetivo"]["Duracao Min"].sum() / 60
+    parada_gerenciavel = dff[dff["Tipo Parada"] == "Parada Gerenciável"]["Duracao Min"].sum() / 60
+    parada_mecanica = dff[dff["Tipo Parada"] == "Parada Mecânica"]["Duracao Min"].sum() / 60
+    parada_improdutiva = dff[dff["Tipo Parada"] == "Parada Improdutiva"]["Duracao Min"].sum() / 60
+    refeicao = dff[dff["Tipo Parada"] == "Refeição"]["Duracao Min"].sum() / 60
+    deslocamento = dff[dff["Tipo Parada"] == "Deslocamento"]["Duracao Min"].sum() / 60
+    manobra = dff[dff["Tipo Parada"] == "Manobra"]["Duracao Min"].sum() / 60
+    outros = dff[dff["Tipo Parada"] == "Outros"]["Duracao Min"].sum() / 60
+
     inicio = dff["Inicio"].min().strftime("%H:%M") if not dff.empty else "-"
     fim = dff["Fim"].max().strftime("%H:%M") if not dff.empty else "-"
     operacoes = dff["Descrição da Operação"].nunique()
@@ -211,14 +256,22 @@ def atualizar_grafico(equipamento, operador, data_str):
     stats_html = html.Div([
         html.Span("Total horas trabalhadas: ", style={"color":"black", "font-weight":"bold"}),
         html.Span(f"{total_horas:.2f}h", style={"margin-right":"18px", "color":"black"}),
-        html.Span("Produtivo: ", style={"color":"black", "font-weight":"bold"}),
-        html.Span(f"{produtivo:.2f}h", style={"margin-right":"18px", "color":"#046414"}),
-        html.Span("Improdutivo: ", style={"color":"black", "font-weight":"bold"}),
-        html.Span(f"{improdutivo:.2f}h", style={"margin-right":"18px", "color":"#DB3B13"}),
-        html.Span("Deslocamento: ", style={"color":"black", "font-weight":"bold"}),
+        html.Span("Efetivo: ", style={"color":"#046414", "font-weight":"bold"}),
+        html.Span(f"{efetivo:.2f}h", style={"margin-right":"18px", "color":"#046414"}),
+        html.Span("Parada Gerenciável: ", style={"color":"#FFC300", "font-weight":"bold"}),
+        html.Span(f"{parada_gerenciavel:.2f}h", style={"margin-right":"18px", "color":"#FFC300"}),
+        html.Span("Parada Mecânica: ", style={"color":"#C70039", "font-weight":"bold"}),
+        html.Span(f"{parada_mecanica:.2f}h", style={"margin-right":"18px", "color":"#C70039"}),
+        html.Span("Parada Improdutiva: ", style={"color":"#DB3B13", "font-weight":"bold"}),
+        html.Span(f"{parada_improdutiva:.2f}h", style={"margin-right":"18px", "color":"#DB3B13"}),
+        html.Span("Refeição: ", style={"color":"#29648A", "font-weight":"bold"}),
+        html.Span(f"{refeicao:.2f}h", style={"margin-right":"18px", "color":"#29648A"}),
+        html.Span("Deslocamento: ", style={"color":"#eebf02", "font-weight":"bold"}),
         html.Span(f"{deslocamento:.2f}h", style={"margin-right":"18px", "color":"#eebf02"}),
-        html.Span("Manobra: ", style={"color":"black", "font-weight":"bold"}),
+        html.Span("Manobra: ", style={"color":"#93c9f7", "font-weight":"bold"}),
         html.Span(f"{manobra:.2f}h", style={"margin-right":"18px", "color":"#93c9f7"}),
+        html.Span("Outros: ", style={"color":"#8C8C8C", "font-weight":"bold"}),
+        html.Span(f"{outros:.2f}h", style={"margin-right":"18px", "color":"#8C8C8C"}),
         html.Span("Início: ", style={"color":"black", "font-weight":"bold"}),
         html.Span(f"{inicio}", style={"margin-right":"18px", "color":"black"}),
         html.Span("Fim: ", style={"color":"black", "font-weight":"bold"}),
@@ -239,7 +292,7 @@ def atualizar_grafico(equipamento, operador, data_str):
         x_start="Inicio",
         x_end="Fim",
         y="Nome",
-        color="Tipo",
+        color="Tipo Parada",
         hover_name="Resumo",
         title=f"Atividades de {operador} em {data_str}",
         color_discrete_map=cores,
