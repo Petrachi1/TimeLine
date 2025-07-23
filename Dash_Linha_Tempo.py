@@ -231,7 +231,7 @@ def atualizar_grafico(operador, equipamento, data_str):
 
     cores = {
         "Efetivo": "#046414",
-        "Parada Gerenciável": "#FF4800",
+        "Parada Gerenciável": "#FF9393",
         "Parada Mecânica": "#A52657",
         "Parada Improdutiva": "#FF0000",
         "Parada Essencial": "#0026FF",
