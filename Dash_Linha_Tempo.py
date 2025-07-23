@@ -6,8 +6,7 @@ from dash.dependencies import Input, Output, State
 from dash import ctx
 
 # Caminho do Excel
-arquivo = "Linha do tempo.xlsx"
-
+arquivo = r"C:\Users\Gabriel Petrachi\OneDrive\bi\Linha do tempo.xlsx"
 df = pd.read_excel(arquivo, sheet_name="Plan1")
 
 # Função para classificar tipo
