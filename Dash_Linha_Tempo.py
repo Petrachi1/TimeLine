@@ -155,14 +155,14 @@ def atualizar_grafico(operador, data_str):
         return {}, ""
     data = pd.to_datetime(data_str).date()
 
-    # Filtra operador, data e REMOVE "FINAL DE EXPEDIENTE"
+    # Filtra operador e data, mas NÃO remove "FINAL DE EXPEDIENTE" ainda!
     dff_raw = df[(df["Nome"] == operador) & (df["Data Hora Local"].dt.date == data)].copy()
-    dff_raw = dff_raw[dff_raw["Descrição da Operação"].str.strip().str.upper() != "FINAL DE EXPEDIENTE"]
 
-    if dff_raw.empty:
-        return {}, html.Div("Sem dados para o operador e data selecionados.", style={"color":"#e9e9e9", "font-size":"18px"})
-
+    # Agrupa as operações (incluindo FINAL DE EXPEDIENTE)
     dff = agrupar_paradas(dff_raw)
+
+    # Agora sim: remove FINAL DE EXPEDIENTE do resultado agrupado
+    dff = dff[dff["Descrição da Operação"].str.strip().str.upper() != "FINAL DE EXPEDIENTE"]
 
     dff["Resumo"] = (
         "Operador: " + dff["Nome"] +
@@ -175,7 +175,7 @@ def atualizar_grafico(operador, data_str):
 
     cores = {
         "Produtiva": "#046414",        # Verde
-        "Improdutiva": "#DB3B13",      # laranja 
+        "Improdutiva": "#DB3B13",      # Laranja 
         "Deslocamento": "#eebf02",     # Amarelo 
         "Manobra": "#93c9f7",          # Azul bebê
         "Outro": "#111111"             # Preto
@@ -255,6 +255,7 @@ def atualizar_grafico(operador, data_str):
     fig.update_xaxes(showgrid=False)
 
     return fig, stats_html
+
 
 if __name__ == "__main__":
     print("Iniciando Dash...")
