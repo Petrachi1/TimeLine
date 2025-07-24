@@ -4,6 +4,7 @@ import dash
 from dash import dcc, html, ctx
 from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
+from datetime import timedelta, datetime
 
 # Caminho do Excel
 arquivo = "Linha do tempo.xlsx"
@@ -35,20 +36,28 @@ df = df.dropna(subset=["Hora Inicial", "Hora Final"])
 df["Hora Inicial Decimal"] = df["Hora Inicial"].apply(lambda x: x.hour + x.minute / 60)
 df["Hora Final Decimal"] = df["Hora Final"].apply(lambda x: x.hour + x.minute / 60)
 df["Duracao Min"] = df["Hora Final Decimal"] - df["Hora Inicial Decimal"]
+
+df["Resumo"] = df.apply(lambda row: (
+    f"Operador: {row['Nome']}<br>"
+    f"Tipo: {row['Tipo']}<br>"
+    f"Operação: {row['Descrição da Operação']}<br>"
+    f"Início: {row['Hora Inicial']}<br>"
+    f"Fim: {row['Hora Final']}<br>"
+    f"Duração: {round(row['Duracao Min'], 2)} min"
+), axis=1)
+
 df["Inicio"] = df.apply(lambda row: pd.to_datetime(f"{row['Data Hora Local'].date()} {row['Hora Inicial']}"), axis=1)
 df["Fim"] = df.apply(lambda row: pd.to_datetime(f"{row['Data Hora Local'].date()} {row['Hora Final']}"), axis=1)
 
-# Classificação da parada
+# Classificador de parada
 def classifica_tipo_parada(row):
     grupo = str(row["Descrição do Grupo da Operação"]).strip().upper()
     desc = str(row["Descrição da Operação"]).strip().upper()
     gerenciaveis = ["AGUARDANDO COMBUSTIVEL", "AGUARDANDO ORDENS", "AGUARDANDO MOVIMENTACAO PIVO", "FALTA DE INSUMOS"]
     essenciais = ["REFEICAO", "BANHEIRO"]
-    mecanicas = [
-        "AGUARDANDO MECANICO", "BORRACHARIA", "EXCESSO DE TEMPERATURA DO MOTOR",
-        "IMPLEMENTO QUEBRADO", "MANUTENCAO ELETRICA", "MANUTENCAO MECANICA",
-        "TRATOR QUEBRADO", "SEM SINAL GPS"
-    ]
+    mecanicas = ["AGUARDANDO MECANICO", "BORRACHARIA", "EXCESSO DE TEMPERATURA DO MOTOR", "IMPLEMENTO QUEBRADO",
+                 "MANUTENCAO ELETRICA", "MANUTENCAO MECANICA", "TRATOR QUEBRADO", "SEM SINAL GPS"]
+
     if grupo == "PRODUTIVA":
         return "Efetivo"
     elif grupo == "IMPRODUTIVA":
@@ -71,7 +80,7 @@ def classifica_tipo_parada(row):
 
 df["Tipo Parada"] = df.apply(classifica_tipo_parada, axis=1)
 
-# Agrupamento
+# Agrupador de paradas
 def agrupar_paradas(df_filtrado):
     df_filtrado = df_filtrado.sort_values(by="Inicio").reset_index(drop=True).copy()
     agrupados = []
@@ -83,6 +92,7 @@ def agrupar_paradas(df_filtrado):
         operacao = atual["Descrição da Operação"]
         nome = atual["Nome"]
         tipo = atual["Tipo Parada"]
+
         j = i + 1
         while j < len(df_filtrado):
             proximo = df_filtrado.loc[j]
@@ -93,40 +103,54 @@ def agrupar_paradas(df_filtrado):
                 j += 1
             else:
                 break
+
         duracao_bloco = (fim_bloco - inicio_bloco).total_seconds() / 60
-        agrupados.append({
+        novo_bloco = {
             "Nome": nome,
             "Inicio": inicio_bloco,
             "Fim": fim_bloco,
             "Descrição da Operação": operacao,
             "Duracao Min": duracao_bloco,
             "Tipo Parada": tipo,
-        })
+        }
+        agrupados.append(novo_bloco)
         i = j
+
     return pd.DataFrame(agrupados)
 
-# Dash App
+# DASH APP
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME])
 app.title = "Linha do Tempo Operacional"
 
-app.layout = html.Div([
-    dbc.Container([
-        html.H1("Linha do Tempo dos Operadores", className="text-center mb-4"),
-        dbc.Card(dbc.CardBody([
-            dbc.Row([
-                dbc.Col(dcc.Dropdown(id="operador-dropdown", options=[
-                    {"label": nome, "value": nome} for nome in sorted(df["Nome"].unique())
-                ], value=sorted(df["Nome"].unique())[0], placeholder="Selecione um Operador"), md=3),
-                dbc.Col(dcc.Dropdown(id="equipamento-dropdown", placeholder="Selecione um Equipamento"), md=4),
-                dbc.Col(dcc.Dropdown(id="data-dropdown", placeholder="Selecione uma Data"), md=3),
-                dbc.Col(dbc.Button([html.I(className="fa fa-arrow-left me-2"), "Retroceder 1 dia"],
-                    id="retroceder-dia", n_clicks=0, color="dark", outline=True, className="w-100"), md=2),
-            ])
-        ]), className="mb-4"),
-        dbc.Card(dbc.CardBody(id="stats-div"), className="mb-4"),
-        dbc.Card(dbc.CardBody(dcc.Graph(id="grafico-linha-tempo", style={"height": "550px"})))
-    ])
-])
+# Cálculo dos valores padrão iniciais
+primeiro_nome = sorted(df["Nome"].unique())[0]
+primeiro_eq = sorted(df[df["Nome"] == primeiro_nome]["Equipamento"].unique())[0]
+primeiras_datas = sorted(df[(df["Nome"] == primeiro_nome) & (df["Equipamento"] == primeiro_eq)]["Data Hora Local"].dt.date.unique())
+hoje = datetime.today().date()
+ontem = hoje - timedelta(days=1)
+data_padrao = str(ontem if ontem in primeiras_datas else primeiras_datas[-1])
+
+app.layout = html.Div(
+    style={"backgroundColor": "#f8f9fa", "padding": "20px"},
+    children=[
+        dbc.Container([
+            html.H1("Linha do Tempo dos Operadores", className="text-center mb-4", style={"color": "#343a40", "fontWeight": "bold"}),
+            dbc.Card(dbc.CardBody([
+                dbc.Row([
+                    dbc.Col(dcc.Dropdown(id="operador-dropdown",
+                        options=[{"label": nome, "value": nome} for nome in sorted(df["Nome"].unique())],
+                        value=primeiro_nome, placeholder="Selecione um Operador"), md=3),
+                    dbc.Col(dcc.Dropdown(id="equipamento-dropdown", value=primeiro_eq, placeholder="Selecione um Equipamento"), md=4),
+                    dbc.Col(dcc.Dropdown(id="data-dropdown", value=data_padrao, placeholder="Selecione uma Data"), md=3),
+                    dbc.Col(dbc.Button([html.I(className="fa fa-arrow-left me-2"), "Retroceder 1 dia"],
+                        id="retroceder-dia", n_clicks=0, color="dark", outline=True, className="w-100"), md=2),
+                ], align="center")
+            ]), className="mb-4"),
+            dbc.Card(dbc.CardBody(id="stats-div"), className="mb-4"),
+            dbc.Card(dbc.CardBody(dcc.Graph(id="grafico-linha-tempo", style={"height": "550px"}))),
+        ], fluid=False)
+    ]
+)
 
 @app.callback(
     Output("equipamento-dropdown", "options"),
