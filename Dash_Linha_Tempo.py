@@ -202,12 +202,26 @@ def create_stat_card(title, value, color, icon):
     Input("data-dropdown", "value")
 )
 def atualizar_grafico(operador, equipamento, data_str):
-    if not operador or not equipamento or not data_str:
-        return {}, html.Div("Ajuste os filtros.", className="text-center text-muted p-4")
+    if not operador:
+        return {}, html.Div("Selecione um operador.", className="text-center text-muted p-4")
+    
+    if not equipamento:
+        return {}, html.Div("Selecione um equipamento.", className="text-center text-muted p-4")
+    
+    if not data_str:
+        return {}, html.Div("Selecione uma data.", className="text-center text-muted p-4")
+
     data = pd.to_datetime(data_str).date()
-    dff_raw = df[(df["Nome"] == operador) & (df["Equipamento"] == equipamento) & (df["Data Hora Local"].dt.date == data)].copy()
+    dff_raw = df[
+        (df["Nome"] == operador) & 
+        (df["Equipamento"] == equipamento) & 
+        (df["Data Hora Local"].dt.date == data)
+    ].copy()
+
     if dff_raw.empty:
         return {}, html.Div("Nenhum dado encontrado.", className="text-center text-muted p-4")
+
+    # Continuação da função...
     dff = agrupar_paradas(dff_raw)
     dff = dff[dff["Descrição da Operação"].str.upper().str.strip() != "FINAL DE EXPEDIENTE"]
     hora_inicio = dff["Inicio"].min().strftime("%H:%M")
