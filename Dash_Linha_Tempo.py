@@ -12,6 +12,7 @@ df = pd.read_excel(arquivo, sheet_name="Plan1")
 # Coluna de equipamento formatado
 df["Equipamento"] = df["Código Equipamento"].astype(str) + " - " + df["Descrição do Equipamento"]
 
+
 def classifica_tipo(row):
     desc = str(row["Descrição da Operação"]).strip().upper()
     grupo = str(row["Descrição do Grupo da Operação"]).strip().upper()
@@ -201,6 +202,8 @@ def atualizar_grafico(operador, equipamento, data_str):
         return {}, html.Div("Ajuste os filtros.", className="text-center text-muted p-4")
     data = pd.to_datetime(data_str).date()
     filtro = (df["Nome"] == operador) & (df["Equipamento"] == equipamento) & (df["Data Hora Local"].dt.date == data)
+    hora_inicio_expediente = dff["Inicio"].min().strftime("%H:%M")
+    hora_fim_expediente = dff["Fim"].max().strftime("%H:%M")
     dff_raw = df[filtro].copy()
     if dff_raw.empty:
         return {}, html.Div("Nenhum dado encontrado.", className="text-center text-muted p-4")
@@ -231,6 +234,8 @@ def atualizar_grafico(operador, equipamento, data_str):
     }
     total_horas = sum(stats.values())
     stats_html = dbc.Row([
+        create_stat_card("Início do Expediente", hora_inicio_expediente, "#6c757d", "fa fa-sign-in-alt"),
+        create_stat_card("Fim do Expediente", hora_fim_expediente, "#6c757d", "fa fa-sign-out-alt"),
         create_stat_card("Total Horas", f"{total_horas:.2f}h", "#343a40", "fa fa-clock"),
         create_stat_card("Efetivo", f"{stats['Efetivo']:.2f}h", cores["Efetivo"], "fa fa-check-circle"),
         create_stat_card("Parada Gerenciável", f"{stats['Parada Gerenciável']:.2f}h", cores["Parada Gerenciável"], "fa fa-pause-circle"),
