@@ -118,81 +118,63 @@ def agrupar_paradas(df_filtrado):
 
     return pd.DataFrame(agrupados)
 
-# DASH APP
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME])
 app.title = "Linha do Tempo Operacional"
 
-# Cálculo dos valores padrão iniciais
 primeiro_nome = sorted(df["Nome"].unique())[0]
 primeiro_eq = sorted(df[df["Nome"] == primeiro_nome]["Equipamento"].unique())[0]
 primeiras_datas = sorted(df[(df["Nome"] == primeiro_nome) & (df["Equipamento"] == primeiro_eq)]["Data Hora Local"].dt.date.unique())
-hoje = datetime.today().date()
-ontem = hoje - timedelta(days=1)
-data_padrao = str(ontem if ontem in primeiras_datas else primeiras_datas[-1])
+data_padrao = str(primeiras_datas[-2]) if len(primeiras_datas) >= 2 else str(primeiras_datas[-1])
 
-app.layout = html.Div(
-    style={"backgroundColor": "#f8f9fa", "padding": "20px"},
-    children=[
-        dbc.Container([
-            html.H1("Linha do Tempo dos Operadores", className="text-center mb-4", style={"color": "#343a40", "fontWeight": "bold"}),
-            dbc.Card(dbc.CardBody([
-                dbc.Row([
-                    dbc.Col(dcc.Dropdown(id="operador-dropdown",
-                        options=[{"label": nome, "value": nome} for nome in sorted(df["Nome"].unique())],
-                        value=primeiro_nome, placeholder="Selecione um Operador"), md=3),
-                    dbc.Col(dcc.Dropdown(id="equipamento-dropdown", value=primeiro_eq, placeholder="Selecione um Equipamento"), md=4),
-                    dbc.Col(dcc.Dropdown(id="data-dropdown", value=data_padrao, placeholder="Selecione uma Data"), md=3),
-                    dbc.Col(dbc.Button([html.I(className="fa fa-arrow-left me-2"), "Retroceder 1 dia"],
-                        id="retroceder-dia", n_clicks=0, color="dark", outline=True, className="w-100"), md=2),
-                ], align="center")
-            ]), className="mb-4"),
-            dbc.Card(dbc.CardBody(id="stats-div"), className="mb-4"),
-            dbc.Card(dbc.CardBody(dcc.Graph(id="grafico-linha-tempo", style={"height": "550px"}))),
-        ], fluid=False)
-    ]
-)
+app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, children=[
+    dbc.Container([
+        html.H1("Linha do Tempo dos Operadores", className="text-center mb-4", style={"color": "#343a40", "fontWeight": "bold"}),
+        dbc.Card(dbc.CardBody([
+            dbc.Row([
+                dbc.Col(dcc.Dropdown(id="operador-dropdown", options=[{"label": nome, "value": nome} for nome in sorted(df["Nome"].unique())], value=primeiro_nome, placeholder="Selecione um Operador"), md=3),
+                dbc.Col(dcc.Dropdown(id="equipamento-dropdown", value=primeiro_eq, placeholder="Selecione um Equipamento"), md=4),
+                dbc.Col(dcc.Dropdown(id="data-dropdown", value=data_padrao, placeholder="Selecione uma Data"), md=3),
+                dbc.Col(dbc.Button([html.I(className="fa fa-arrow-left me-2"), "Retroceder 1 dia"], id="retroceder-dia", n_clicks=0, color="dark", outline=True, className="w-100"), md=2),
+            ], align="center")
+        ]), className="mb-4"),
+        dbc.Card(dbc.CardBody(id="stats-div"), className="mb-4"),
+        dbc.Card(dbc.CardBody(dcc.Graph(id="grafico-linha-tempo", style={"height": "550px"}))),
+    ], fluid=False)
+])
 
 @app.callback(
     Output("equipamento-dropdown", "options"),
     Output("equipamento-dropdown", "value"),
-    Input("operador-dropdown", "value"),
-)
-def atualizar_equipamentos(operador):
-    if not operador:
-        return [], None
-    equipamentos = df[df["Nome"] == operador]["Equipamento"].unique()
-    opcoes = [{"label": eq, "value": eq} for eq in sorted(equipamentos)]
-    return opcoes, opcoes[0] if opcoes else None
-
-@app.callback(
     Output("data-dropdown", "options"),
     Output("data-dropdown", "value"),
     Input("operador-dropdown", "value"),
-    Input("equipamento-dropdown", "value"),
-    Input("retroceder-dia", "n_clicks"),
-    State("data-dropdown", "value"),
 )
-def atualizar_datas(operador, equipamento, n_clicks, data_atual):
-    if not operador or not equipamento:
-        return [], None
-    filtro = (df["Nome"] == operador) & (df["Equipamento"] == equipamento)
-    datas = sorted(df[filtro]["Data Hora Local"].dt.date.unique())
-    opcoes = [{"label": str(d), "value": str(d)} for d in datas]
-    if not ctx.triggered_id or ctx.triggered_id in ["operador-dropdown", "equipamento-dropdown"]:
-        return opcoes, str(datas[-1]) if datas else None
-    if ctx.triggered_id == "retroceder-dia" and data_atual:
-        try:
-            idx = [str(d) for d in datas].index(data_atual)
-            return opcoes, str(datas[max(idx - 1, 0)])
-        except ValueError:
-            return opcoes, data_atual
-    return opcoes, data_atual
+def atualizar_equipamento_e_data(operador):
+    if not operador:
+        return [], None, [], None
 
-def create_stat_card(title, value, color, icon):
-    return dbc.Col(dbc.Card(dbc.CardBody([
-        html.H4(value, style={"color": color, "fontWeight": "bold"}),
-        html.P(title, className="text-muted")
-    ]), className="text-center shadow-sm"), md=2, className="mb-2")
+    equipamentos = sorted(df[df["Nome"] == operador]["Equipamento"].unique())
+    if not equipamentos:
+        return [], None, [], None
+
+    equipamento_padrao = equipamentos[0]
+
+    datas = sorted(df[(df["Nome"] == operador) & (df["Equipamento"] == equipamento_padrao)]["Data Hora Local"].dt.date.unique())
+    opcoes_datas = [{"label": str(d), "value": str(d)} for d in datas]
+
+    if len(datas) >= 2:
+        data_padrao = str(datas[-2])
+    elif datas:
+        data_padrao = str(datas[-1])
+    else:
+        data_padrao = None
+
+    return (
+        [{"label": eq, "value": eq} for eq in equipamentos],
+        equipamento_padrao,
+        opcoes_datas,
+        data_padrao,
+    )
 
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
@@ -204,10 +186,12 @@ def create_stat_card(title, value, color, icon):
 def atualizar_grafico(operador, equipamento, data_str):
     if not operador or not equipamento or not data_str:
         return {}, html.Div("Ajuste os filtros.", className="text-center text-muted p-4")
+
     data = pd.to_datetime(data_str).date()
     dff_raw = df[(df["Nome"] == operador) & (df["Equipamento"] == equipamento) & (df["Data Hora Local"].dt.date == data)].copy()
     if dff_raw.empty:
         return {}, html.Div("Nenhum dado encontrado.", className="text-center text-muted p-4")
+
     dff = agrupar_paradas(dff_raw)
     dff = dff[dff["Descrição da Operação"].str.upper().str.strip() != "FINAL DE EXPEDIENTE"]
     hora_inicio = dff["Inicio"].min().strftime("%H:%M")
@@ -221,6 +205,13 @@ def atualizar_grafico(operador, equipamento, data_str):
         "Deslocamento": dff[dff["Tipo Parada"] == "Deslocamento"]["Duracao Min"].sum() / 60,
     }
     total = sum(stats.values())
+
+    def create_stat_card(title, value, color, icon):
+        return dbc.Col(dbc.Card(dbc.CardBody([
+            html.H4(value, style={"color": color, "fontWeight": "bold"}),
+            html.P(title, className="text-muted")
+        ]), className="text-center shadow-sm"), md=2, className="mb-2")
+
     stats_html = dbc.Row([
         create_stat_card("Início do Expediente", hora_inicio, "#6c757d", "fa fa-sign-in-alt"),
         create_stat_card("Fim do Expediente", hora_fim, "#6c757d", "fa fa-sign-out-alt"),
@@ -231,6 +222,7 @@ def atualizar_grafico(operador, equipamento, data_str):
         create_stat_card("Parada Improdutiva", f"{stats['Parada Improdutiva']:.2f}h", "#FF0000", "fa fa-times-circle"),
         create_stat_card("Parada Essencial", f"{stats['Parada Essencial']:.2f}h", "#0026FF", "fa fa-coffee"),
     ], justify="center")
+
     dff["Resumo"] = dff.apply(lambda r: (
         f"Operador: {r['Nome']}<br>Tipo: {r['Tipo Parada']}<br>"
         f"Operação: {r['Descrição da Operação']}<br>"
@@ -238,6 +230,7 @@ def atualizar_grafico(operador, equipamento, data_str):
         f"Fim: {r['Fim'].strftime('%H:%M')}<br>"
         f"Duração: {round(r['Duracao Min'], 2)} min"
     ), axis=1)
+
     fig = px.timeline(
         dff, x_start="Inicio", x_end="Fim", y="Nome", color="Tipo Parada",
         hover_name="Resumo", color_discrete_map={
