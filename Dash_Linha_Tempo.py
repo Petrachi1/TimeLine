@@ -80,7 +80,7 @@ def classifica_tipo_parada(row):
 
 df["Tipo Parada"] = df.apply(classifica_tipo_parada, axis=1)
 
-# Agrupador de paradas
+# Agrupador de paradas (mantive como estava)
 def agrupar_paradas(df_filtrado):
     df_filtrado = df_filtrado.sort_values(by="Inicio").reset_index(drop=True).copy()
     agrupados = []
@@ -121,6 +121,7 @@ def agrupar_paradas(df_filtrado):
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME])
 app.title = "Linha do Tempo Operacional"
 
+# valores iniciais para o layout (apenas para o carregamento inicial da página)
 primeiro_nome = sorted(df["Nome"].unique())[0]
 primeiro_eq = sorted(df[df["Nome"] == primeiro_nome]["Equipamento"].unique())[0]
 primeiras_datas = sorted(df[(df["Nome"] == primeiro_nome) & (df["Equipamento"] == primeiro_eq)]["Data Hora Local"].dt.date.unique())
@@ -142,40 +143,66 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
     ], fluid=False)
 ])
 
+# ---------- CALLBACK: atualizar equipamentos ao mudar operador ----------
 @app.callback(
     Output("equipamento-dropdown", "options"),
     Output("equipamento-dropdown", "value"),
+    Input("operador-dropdown", "value"),
+)
+def atualizar_equipamento(operador):
+    if not operador:
+        return [], None
+
+    equipamentos = sorted(df[df["Nome"] == operador]["Equipamento"].unique().tolist())
+    if not equipamentos:
+        return [], None
+
+    equipamento_padrao = equipamentos[0]
+    opcoes_equip = [{"label": eq, "value": eq} for eq in equipamentos]
+
+    return opcoes_equip, equipamento_padrao
+
+# ---------- CALLBACK: atualizar datas (filtradas por operador + equipamento).
+# Também responde ao botão "retroceder-dia" para mudar a data selecionada ----------
+@app.callback(
     Output("data-dropdown", "options"),
     Output("data-dropdown", "value"),
     Input("operador-dropdown", "value"),
+    Input("equipamento-dropdown", "value"),
+    Input("retroceder-dia", "n_clicks"),
+    State("data-dropdown", "value"),
 )
-def atualizar_equipamento_e_data(operador):
-    if not operador:
-        return [], None, [], None
+def atualizar_datas(operador, equipamento, n_clicks, data_atual):
+    # n_clicks pode ser None no carregamento inicial -> tratar como 0
+    if not operador or not equipamento:
+        return [], None
 
-    equipamentos = sorted(df[df["Nome"] == operador]["Equipamento"].unique())
-    if not equipamentos:
-        return [], None, [], None
-
-    equipamento_padrao = equipamentos[0]
-
-    datas = sorted(df[(df["Nome"] == operador) & (df["Equipamento"] == equipamento_padrao)]["Data Hora Local"].dt.date.unique())
+    datas = sorted(df[(df["Nome"] == operador) & (df["Equipamento"] == equipamento)]["Data Hora Local"].dt.date.unique().tolist())
     opcoes_datas = [{"label": str(d), "value": str(d)} for d in datas]
 
-    if len(datas) >= 2:
-        data_padrao = str(datas[-2])
-    elif datas:
-        data_padrao = str(datas[-1])
+    if not datas:
+        return [], None
+
+    # Se o callback foi disparado pelo botão "retroceder-dia", tentamos mover a seleção um índice para trás
+    trigger = ctx.triggered_id
+    if trigger == "retroceder-dia" and data_atual:
+        str_datas = [str(d) for d in datas]
+        try:
+            idx = str_datas.index(data_atual)
+        except ValueError:
+            idx = len(str_datas) - 1
+        new_idx = max(0, idx - 1)
+        valor = str_datas[new_idx]
     else:
-        data_padrao = None
+        # Caso normal (mudança de operador/equipamento): escolhemos a penúltima data se houver
+        if len(datas) >= 2:
+            valor = str(datas[-2])
+        else:
+            valor = str(datas[-1])
 
-    return (
-        [{"label": eq, "value": eq} for eq in equipamentos],
-        equipamento_padrao,
-        opcoes_datas,
-        data_padrao,
-    )
+    return opcoes_datas, valor
 
+# ---------- CALLBACK: gráfico e estatísticas (mantive quase igual) ----------
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Output("stats-div", "children"),
