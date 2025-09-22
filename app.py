@@ -1,7 +1,7 @@
 import pandas as pd
 import plotly.express as px
 import dash
-from dash import dcc, html, ctx
+from dash import dcc, html, ctx, dash_table
 from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
 from datetime import datetime
@@ -9,8 +9,12 @@ import numpy as np
 
 # ================== CONFIGS ==================
 START_OF_DAY_HOUR = 7        # Âncora do "dia operacional" (ex.: 07:00 -> 07:00)
-JORNADA_MIN = 9 * 60 + 48    # 9h48 em minutos
-TOLERANCIA_MIN = 10          # margem pra não "picar" OK
+JORNADA_END_HOUR = 16        # Para marcar linha de referência da jornada (16:48)
+JORNADA_END_MIN  = 48
+NIGHT_START_HOUR = 19        # Noite: 19:00 → 07:00
+NIGHT_END_HOUR   = 7
+
+DESTAQUE_PADRAO_MIN = 15     # limiar padrão para destacar deltas (min)
 
 # ================== DADOS ==================
 arquivo = "Linha do tempo.xlsx"
@@ -48,10 +52,9 @@ df = df.dropna(subset=["Hora Inicial", "Hora Final", "Data Hora Local"]).copy()
 df["Inicio"] = df.apply(lambda r: pd.to_datetime(f"{r['Data Hora Local'].date()} {r['Hora Inicial']}"), axis=1)
 df["Fim"]    = df.apply(lambda r: pd.to_datetime(f"{r['Data Hora Local'].date()} {r['Hora Final']}"), axis=1)
 
-# Normaliza "Fim" >= "Inicio" (caso a planilha traga algo invertido por ruído)
+# Normaliza "Fim" >= "Inicio" (caso invertido por ruído)
 swap_mask = df["Fim"] < df["Inicio"]
 if swap_mask.any():
-    # quando invertido, troca os valores
     tmp = df.loc[swap_mask, "Inicio"].copy()
     df.loc[swap_mask, "Inicio"] = df.loc[swap_mask, "Fim"]
     df.loc[swap_mask, "Fim"] = tmp
@@ -118,7 +121,32 @@ def janela_operacional(data_str: str, hour_anchor: int = START_OF_DAY_HOUR):
     win_end   = win_start + pd.Timedelta(days=1)
     return win_start, win_end
 
-# Formatador HH:MM
+def overlap_min(a0, a1, b0, b1):
+    start = max(a0, b0)
+    end   = min(a1, b1)
+    return max(0.0, (end - start).total_seconds() / 60.0)
+
+def night_intervals(win_start, win_end):
+    """Retorna lista de intervalos noturnos dentro da janela (19:00→00:00 e 00:00→07:00 por padrão)."""
+    intervals = []
+    # Noite 1: do dia base às 19:00 até 00:00
+    eve_start = win_start.replace(hour=NIGHT_START_HOUR, minute=0, second=0, microsecond=0)
+    if eve_start < win_start:  # se a janela começar depois de 19:00 numa data incomum
+        eve_start = eve_start + pd.Timedelta(days=1)
+    midnight = eve_start.normalize() + pd.Timedelta(days=1)
+    if eve_start < win_end:
+        intervals.append((max(win_start, eve_start), min(win_end, midnight)))
+    # Noite 2: 00:00 → 07:00 do dia seguinte
+    next_midnight = win_start.normalize() + pd.Timedelta(days=1)
+    morning_end = next_midnight.replace(hour=NIGHT_END_HOUR, minute=0, second=0, microsecond=0)
+    intervals.append((max(win_start, next_midnight), min(win_end, morning_end)))
+    # Sanitiza intervalos vazios
+    intervals = [(s, e) for s, e in intervals if e > s]
+    return intervals
+
+def fmt_hhmm(ts):
+    return "-" if pd.isna(ts) else pd.to_datetime(ts).strftime("%H:%M")
+
 def fmt_horas(mins: float) -> str:
     mins = max(0.0, float(mins))
     h = int(mins // 60)
@@ -154,14 +182,30 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
             ], align="center")
         ]), className="mb-4"),
 
-        # Cards + gráfico da linha do tempo (por operador/equipamento)
+        # Cards + gráfico
         dbc.Card(dbc.CardBody(id="stats-div"), className="mb-4"),
         dbc.Card(dbc.CardBody(dcc.Graph(id="grafico-linha-tempo", style={"height": "550px"}))),
 
-        # Tabela externa (filtra só por dia operacional; independe de máquina/operador)
+        # Tabela minimalista: controles
         dbc.Card(dbc.CardBody([
-            html.H4("Resumo diário por operador (dia operacional selecionado)", className="mb-3"),
-            html.P(f"Janela do dia: {START_OF_DAY_HOUR:02d}:00 → {START_OF_DAY_HOUR:02d}:00 (D+1)", className="text-muted", style={"marginTop": "-10px"}),
+            html.H4("Resumo diário por operador (dia operacional)", className="mb-1"),
+            html.P(f"Janela: {START_OF_DAY_HOUR:02d}:00 → {START_OF_DAY_HOUR:02d}:00 (D+1)  •  Noite: {NIGHT_START_HOUR:02d}:00 → {NIGHT_END_HOUR:02d}:00", className="text-muted", style={"marginTop": "-4px"}),
+            dbc.Row([
+                dbc.Col([
+                    html.Label("Limiar para destaque (min)"),
+                    dcc.Slider(id="delta-min-slider", min=0, max=120, step=5, value=DESTAQUE_PADRAO_MIN,
+                               marks={0:"0",30:"30",60:"60",90:"90",120:"120"})
+                ], md=6),
+                dbc.Col([
+                    html.Label("Filtro"),
+                    dcc.Checklist(
+                        id="somente-destaques",
+                        options=[{"label":" Mostrar somente destaques","value":"on"}],
+                        value=[],
+                        inputStyle={"marginRight":"6px","marginLeft":"4px"}
+                    )
+                ], md=6),
+            ], className="mb-2"),
             html.Div(id="tabela-resumo-dia")
         ]), className="mt-4"),
     ], fluid=False)
@@ -212,7 +256,7 @@ def atualizar_datas(operador, equipamento, n_clicks, data_atual):
 
     return opcoes_datas, valor
 
-# ---------- Gráfico + stats do operador ----------
+# ---------- Gráfico + stats do operador com noite destacada ----------
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Output("stats-div", "children"),
@@ -224,8 +268,10 @@ def atualizar_grafico(operador, equipamento, data_str):
     if not operador or not equipamento or not data_str:
         return {}, html.Div("Ajuste os filtros.", className="text-center text-muted p-4")
 
-    data = pd.to_datetime(data_str).date()
-    dff_raw = df[(df["Nome"] == operador) & (df["Equipamento"] == equipamento) & (df["Data Hora Local"].dt.date == data)].copy()
+    win_start, win_end = janela_operacional(data_str, START_OF_DAY_HOUR)
+    dff_raw = df[(df["Nome"] == operador) &
+                 (df["Equipamento"] == equipamento) &
+                 (df["Fim"] > win_start) & (df["Inicio"] < win_end)].copy()
     if dff_raw.empty:
         return {}, html.Div("Nenhum dado encontrado.", className="text-center text-muted p-4")
 
@@ -234,28 +280,30 @@ def atualizar_grafico(operador, equipamento, data_str):
     # Excluir 'FINAL/FIM DE EXPEDIENTE'
     exp_set = {"FINAL DE EXPEDIENTE", "FIM DE EXPEDIENTE"}
     dff = dff[~dff["Descrição da Operação"].str.upper().str.strip().isin(exp_set)]
-
     if dff.empty:
         return {}, html.Div("Nenhum dado útil para visualizar.", className="text-center text-muted p-4")
 
-    hora_inicio = dff["Inicio"].min().strftime("%H:%M")
-    hora_fim = dff["Fim"].max().strftime("%H:%M")
+    # CLIPA na janela operacional para o gráfico
+    dff["Inicio_clip"] = dff["Inicio"].clip(lower=win_start)
+    dff["Fim_clip"]    = dff["Fim"].clip(upper=win_end)
+    dff["Duracao Min Clip"] = (dff["Fim_clip"] - dff["Inicio_clip"]).dt.total_seconds() / 60.0
+    dff = dff[dff["Duracao Min Clip"] > 0]
 
-    # Somas por tipo (horas)
-    def soma_h(tipo):
-        return float(dff[dff["Tipo Parada"] == tipo]["Duracao Min"].sum()) / 60.0
+    hora_inicio = dff["Inicio_clip"].min().strftime("%H:%M")
+    hora_fim    = dff["Fim_clip"].max().strftime("%H:%M")
 
-    stats = {
-        "Efetivo": soma_h("Efetivo"),
-        "Parada Gerenciável": soma_h("Parada Gerenciável"),
-        "Parada Mecânica": soma_h("Parada Mecânica"),
-        "Parada Improdutiva": soma_h("Parada Improdutiva"),
-        "Parada Essencial": soma_h("Parada Essencial"),
-        "Deslocamento": soma_h("Deslocamento"),
-        "Manobra": soma_h("Manobra"),
-    }
-    total = sum(stats.values())
+    # Efetivo Dia vs Noite
+    night_ints = night_intervals(win_start, win_end)
+    def minutos_noite(row):
+        return sum(overlap_min(row["Inicio_clip"], row["Fim_clip"], s, e) for s, e in night_ints)
+    dff["Min_Noite"] = dff.apply(minutos_noite, axis=1)
+    dff["Min_Dia"]   = dff["Duracao Min Clip"] - dff["Min_Noite"]
 
+    efet = dff[dff["Tipo Parada"] == "Efetivo"]
+    efet_noite_h = efet["Min_Noite"].sum() / 60.0
+    efet_dia_h   = efet["Min_Dia"].sum() / 60.0
+
+    # Stats cards essenciais
     def create_stat_card(title, value, color):
         return dbc.Col(
             dbc.Card(dbc.CardBody([
@@ -265,37 +313,36 @@ def atualizar_grafico(operador, equipamento, data_str):
             md=2, className="mb-2"
         )
 
+    total_h = dff["Duracao Min Clip"].sum() / 60.0
     stats_html = dbc.Row([
-        create_stat_card("Início do Expediente", hora_inicio, "#6c757d"),
-        create_stat_card("Fim do Expediente", hora_fim, "#6c757d"),
-        create_stat_card("Total Horas", f"{total:.2f}h", "#343a40"),
-        create_stat_card("Efetivo", f"{stats['Efetivo']:.2f}h", "#046414"),
-        create_stat_card("Parada Gerenciável", f"{stats['Parada Gerenciável']:.2f}h", "#FF9393"),
-        create_stat_card("Parada Mecânica", f"{stats['Parada Mecânica']:.2f}h", "#A52657"),
-        create_stat_card("Parada Improdutiva", f"{stats['Parada Improdutiva']:.2f}h", "#FF0000"),
-        create_stat_card("Parada Essencial", f"{stats['Parada Essencial']:.2f}h", "#0026FF"),
+        create_stat_card("Início (janela)", hora_inicio, "#6c757d"),
+        create_stat_card("Fim (janela)",    hora_fim,    "#6c757d"),
+        create_stat_card("Total Horas", f"{total_h:.2f}h", "#343a40"),
+        create_stat_card("Efetivo Dia",   f"{efet_dia_h:.2f}h", "#046414"),
+        create_stat_card("Efetivo Noite", f"{efet_noite_h:.2f}h", "#6f42c1"),
     ], justify="center")
 
     # Tooltip detalhado
     dff["Resumo"] = dff.apply(lambda r: (
         f"Operador: {r['Nome']}<br>Tipo: {r['Tipo Parada']}<br>"
         f"Operação: {r['Descrição da Operação']}<br>"
-        f"Início: {r['Inicio'].strftime('%H:%M')}<br>"
-        f"Fim: {r['Fim'].strftime('%H:%M')}<br>"
-        f"Duração: {round(r['Duracao Min'], 2)} min"
+        f"Início: {r['Inicio_clip'].strftime('%H:%M')}<br>"
+        f"Fim: {r['Fim_clip'].strftime('%H:%M')}<br>"
+        f"Duração: {round(r['Duracao Min Clip'], 2)} min<br>"
+        f"Noite: {round(r['Min_Noite'], 1)} min"
     ), axis=1)
 
     fig = px.timeline(
-        dff, x_start="Inicio", x_end="Fim", y="Nome", color="Tipo Parada",
+        dff, x_start="Inicio_clip", x_end="Fim_clip", y="Nome", color="Tipo Parada",
         hover_name="Resumo",
         color_discrete_map={
             "Efetivo": "#046414", "Parada Gerenciável": "#FF9393", "Parada Mecânica": "#A52657",
-            "Parada Improdutiva": "#FF0000", "Parada Essencial": "#0026FF", "Deslocamento": "#ffee00",
-            "Manobra": "#93c9f7", "Outros": "#8C8C8C", "Outro": "#222"
+            "Parada Improdutiva": "#FF0000", "Parada Essencial": "#0026FF",
+            "Deslocamento": "#ffee00", "Manobra": "#93c9f7", "Outros": "#8C8C8C", "Outro": "#222"
         }
     )
     fig.update_layout(
-        title=f"<b>Atividades de {operador}</b> em <span style='color:#39d353'>{data_str}</span>",
+        title=f"<b>Atividades de {operador}</b> — janela {START_OF_DAY_HOUR:02d}:00 → {START_OF_DAY_HOUR:02d}:00 (D+1)",
         plot_bgcolor='#181818', paper_bgcolor='#181818',
         font=dict(color="#e9e9e9"), xaxis_title="Horário", yaxis_title="",
         margin=dict(l=40, r=40, t=80, b=60), height=550,
@@ -303,21 +350,31 @@ def atualizar_grafico(operador, equipamento, data_str):
     )
     fig.update_traces(marker=dict(line=dict(width=1, color='white')))
     fig.update_yaxes(autorange="reversed")
+
+    # Faixas de NOITE (sombreadas)
+    for s, e in night_intervals(win_start, win_end):
+        fig.add_vrect(x0=s, x1=e, fillcolor="#3a2e5f", opacity=0.25, layer="below", line_width=0)
+
+    # Linhas de referência: início da janela e fim da jornada (16:48) dentro da janela
+    fig.add_vline(x=win_start, line_width=1, line_dash="dot", line_color="#9aa0a6")
+    jornada_end = win_start.replace(hour=JORNADA_END_HOUR, minute=JORNADA_END_MIN)
+    if win_start <= jornada_end <= win_end:
+        fig.add_vline(x=jornada_end, line_width=1, line_dash="dash", line_color="#9aa0a6")
+
     return fig, stats_html
 
-# ---------- Tabela diária (independe de máquina/operador) ----------
+# ---------- Tabela diária minimalista (independe de máquina/operador) ----------
 @app.callback(
     Output("tabela-resumo-dia", "children"),
-    Input("data-dropdown", "value")
+    Input("data-dropdown", "value"),
+    Input("delta-min-slider", "value"),
+    Input("somente-destaques", "value"),
 )
-def atualizar_resumo_dia(data_str):
+def atualizar_resumo_dia(data_str, limiar_min, somente_destaques):
     if not data_str:
         return html.Div("Selecione uma data.", className="text-center text-muted p-2")
 
-    # Janela do "dia operacional" (ex.: 07:00 → 07:00)
     win_start, win_end = janela_operacional(data_str, START_OF_DAY_HOUR)
-
-    # Traz tudo que INTERSECTA a janela (não só o dia calendário)
     df_win = df[(df["Fim"] > win_start) & (df["Inicio"] < win_end)].copy()
     if df_win.empty:
         return html.Div("Nenhum dado encontrado para a janela operacional.", className="text-center text-muted p-2")
@@ -326,7 +383,6 @@ def atualizar_resumo_dia(data_str):
     exp_set = {"FINAL DE EXPEDIENTE", "FIM DE EXPEDIENTE"}
 
     for nome, grupo_raw in df_win.groupby("Nome"):
-        # Agrupa e exclui fim de expediente
         dff = agrupar_paradas(grupo_raw)
         if dff.empty:
             continue
@@ -334,65 +390,81 @@ def atualizar_resumo_dia(data_str):
         if dff.empty:
             continue
 
-        # CLIP nas bordas da janela (corta blocos que vazam pra fora)
+        # clip na janela
         dff["Inicio_clip"] = dff["Inicio"].clip(lower=win_start)
         dff["Fim_clip"]    = dff["Fim"].clip(upper=win_end)
-
-        # Duração clipada (min)
         dff["Duracao Min Clip"] = (dff["Fim_clip"] - dff["Inicio_clip"]).dt.total_seconds() / 60.0
-        dff.loc[dff["Duracao Min Clip"] < 0, "Duracao Min Clip"] = 0.0
+        dff = dff[dff["Duracao Min Clip"] > 0]
 
-        if dff["Duracao Min Clip"].sum() <= 0:
+        if dff.empty:
             continue
 
-        inicio = dff["Inicio_clip"].min()
-        fim    = dff["Fim_clip"].max()
-        total_min = float(dff["Duracao Min Clip"].sum())
+        # hora início/fim gerais na janela
+        h_inicio = dff["Inicio_clip"].min()
+        h_fim    = dff["Fim_clip"].max()
 
-        # % por tipo (usando duração clipada)
-        stats_min = dff.groupby("Tipo Parada")["Duracao Min Clip"].sum()
-        total_pct = float(stats_min.sum()) if float(stats_min.sum()) > 0 else 1.0
-        def pct(tipo): return f"{(float(stats_min.get(tipo, 0.0)) / total_pct) * 100:.1f}%"
-
-        # Primeiro efetivo (clipado)
+        # primeiro e último efetivo
         efet = dff[dff["Tipo Parada"] == "Efetivo"]
-        primeiro_efetivo = efet["Inicio_clip"].min().strftime("%H:%M") if not efet.empty else "-"
+        h_inicio_ef = efet["Inicio_clip"].min() if not efet.empty else pd.NaT
+        h_fim_ef    = efet["Fim_clip"].max() if not efet.empty else pd.NaT
 
-        # Status da jornada com tolerância
-        if total_min > JORNADA_MIN + TOLERANCIA_MIN:
-            status = "Hora Extra"
-        elif total_min < JORNADA_MIN - TOLERANCIA_MIN:
-            status = "Suspeito"
-        else:
-            status = "OK"
+        # deltas (min)
+        delta_ini = np.nan
+        delta_fim = np.nan
+        if pd.notna(h_inicio_ef):
+            delta_ini = (h_inicio_ef - h_inicio).total_seconds()/60.0
+        if pd.notna(h_fim_ef):
+            delta_fim = (h_fim - h_fim_ef).total_seconds()/60.0
 
         linhas.append({
             "Nome": nome,
-            "Início": inicio.strftime("%H:%M"),
-            "Fim": fim.strftime("%H:%M"),
-            "Horas Trabalhadas": fmt_horas(total_min),
-            "Status Jornada": status,
-            "Primeiro Efetivo": primeiro_efetivo,
-            "Efetivo %": pct("Efetivo"),
-            "Parada Gerenciável %": pct("Parada Gerenciável"),
-            "Parada Mecânica %": pct("Parada Mecânica"),
-            "Parada Improdutiva %": pct("Parada Improdutiva"),
-            "Parada Essencial %": pct("Parada Essencial"),
-            "Deslocamento %": pct("Deslocamento"),
-            "Manobra %": pct("Manobra"),
+            "Hora início": fmt_hhmm(h_inicio),
+            "Hora fim": fmt_hhmm(h_fim),
+            "Hora início efetivo": fmt_hhmm(h_inicio_ef),
+            "Hora fim efetivo": fmt_hhmm(h_fim_ef),
+            "Δ início (min)": None if pd.isna(delta_ini) else round(delta_ini, 1),
+            "Δ fim (min)":    None if pd.isna(delta_fim) else round(delta_fim, 1),
         })
 
     if not linhas:
         return html.Div("Sem registros consolidados para a janela operacional.", className="text-center text-muted p-2")
 
-    df_resumo = pd.DataFrame(linhas).sort_values(["Status Jornada", "Nome"]).reset_index(drop=True)
+    df_resumo = pd.DataFrame(linhas).sort_values(["Nome"]).reset_index(drop=True)
 
-    return dbc.Table.from_dataframe(
-        df_resumo,
-        striped=True,
-        bordered=True,
-        hover=True,
-        className="table-sm"
+    # filtro "somente destaques"
+    if "on" in (somente_destaques or []):
+        mask = (df_resumo["Δ início (min)"].abs().fillna(0) >= limiar_min) | (df_resumo["Δ fim (min)"].abs().fillna(0) >= limiar_min)
+        df_resumo = df_resumo[mask]
+
+    # DataTable com ordenação e filtro nativos + estilização dinâmica pelos deltas
+    style_cond = [
+        {
+            "if": {
+                "filter_query": f"abs({{{{Δ início (min)}}}}) >= {limiar_min}",
+                "column_id": "Δ início (min)"
+            },
+            "backgroundColor": "#fff3cd", "color": "#5c4400", "fontWeight": "600"
+        },
+        {
+            "if": {
+                "filter_query": f"abs({{{{Δ fim (min)}}}}) >= {limiar_min}",
+                "column_id": "Δ fim (min)"
+            },
+            "backgroundColor": "#ffd6d6", "color": "#7a0000", "fontWeight": "600"
+        },
+    ]
+
+    return dash_table.DataTable(
+        id="datatable-resumo",
+        data=df_resumo.to_dict("records"),
+        columns=[{"name": c, "id": c} for c in df_resumo.columns],
+        page_size=20,
+        sort_action="native",
+        filter_action="native",
+        style_table={"overflowX": "auto"},
+        style_cell={"padding": "6px", "fontFamily": "Inter, system-ui, sans-serif", "fontSize": "14px"},
+        style_header={"backgroundColor": "#f1f3f5", "fontWeight": "700"},
+        style_data_conditional=style_cond
     )
 
 # ================== RUN ==================
