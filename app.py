@@ -7,19 +7,19 @@ import dash_bootstrap_components as dbc
 from datetime import timedelta
 import unicodedata
 
-# =============== PARÂMETROS ===============
+# ===================== PARÂMETROS =====================
 ARQUIVO = "Linha do tempo.xlsx"
 SHEET   = "Plan1"
 
-# =============== CARREGAMENTO ===============
+# ===================== CARGA & LIMPEZA =====================
 df = pd.read_excel(ARQUIVO, sheet_name=SHEET)
 
 # Equipamento (apenas visual; NÃO filtramos por ele)
 df["Equipamento"] = df["Código Equipamento"].astype(str) + " - " + df["Descrição do Equipamento"]
 
-# Parsing básico
-df["Hora Inicial"]   = pd.to_datetime(df["Hora Inicial"], format="%H:%M:%S", errors="coerce").dt.time
-df["Hora Final"]     = pd.to_datetime(df["Hora Final"],   format="%H:%M:%S", errors="coerce").dt.time
+# Parsing
+df["Hora Inicial"]    = pd.to_datetime(df["Hora Inicial"], format="%H:%M:%S", errors="coerce").dt.time
+df["Hora Final"]      = pd.to_datetime(df["Hora Final"],   format="%H:%M:%S", errors="coerce").dt.time
 df["Data Hora Local"] = pd.to_datetime(df["Data Hora Local"], dayfirst=True, errors="coerce")
 df = df.dropna(subset=["Nome", "Hora Inicial", "Hora Final", "Data Hora Local"]).copy()
 
@@ -31,7 +31,7 @@ df["Fim"]    = df.apply(lambda r: pd.to_datetime(f"{r['Data Hora Local'].date()}
 mask_cross = df["Fim"] < df["Inicio"]
 df.loc[mask_cross, "Fim"] = df.loc[mask_cross, "Fim"] + pd.Timedelta(days=1)
 
-# =============== CLASSIFICAÇÃO ===============
+# ===================== CLASSIFICAÇÃO =====================
 def classifica_tipo_parada(row):
     grupo = str(row["Descrição do Grupo da Operação"]).strip().upper()
     desc  = str(row["Descrição da Operação"]).strip().upper()
@@ -52,9 +52,19 @@ def classifica_tipo_parada(row):
 
 df["Tipo Parada"] = df.apply(classifica_tipo_parada, axis=1)
 
-# =============== AGRUPADORES ===============
+# ===================== UTILIDADES =====================
+def normalize_ascii_upper(s: str) -> str:
+    return unicodedata.normalize("NFKD", str(s)).encode("ASCII","ignore").decode("ASCII").upper()
+
+def eh_fim_de_expediente(txt: str) -> bool:
+    t = normalize_ascii_upper(txt)
+    return ("EXPEDIENTE" in t) and (("FIM" in t) or ("FINAL" in t))
+
 def agrupar_paradas(df_filtrado):
-    """Colapsa blocos contíguos da MESMA operação e MESMO equipamento (gap <= 2min)."""
+    """
+    Colapsa blocos contíguos da MESMA operação, MESMO equipamento e MESMO operador (gap <= 2min).
+    Retorna linhas com: Nome, Inicio, Fim, Descrição da Operação, Duracao Min, Tipo Parada, Equipamento.
+    """
     if df_filtrado.empty:
         return pd.DataFrame(columns=["Nome","Inicio","Fim","Descrição da Operação","Duracao Min","Tipo Parada","Equipamento"])
     d = df_filtrado.sort_values("Inicio").reset_index(drop=True)
@@ -81,33 +91,56 @@ def agrupar_paradas(df_filtrado):
         i = j
     return pd.DataFrame(out)
 
-def blocos_equipamento(dff_raw):
-    """Faixas de uso por equipamento (independe da operação)."""
-    d = dff_raw.sort_values("Inicio").reset_index(drop=True)
-    out = []; i = 0
-    while i < len(d):
-        a = d.loc[i]
-        equip, ini, fim = a["Equipamento"], a["Inicio"], a["Fim"]
-        j = i + 1
-        while j < len(d):
-            p = d.loc[j]
-            gap = (p["Inicio"] - fim).total_seconds()/60.0
-            if (p["Equipamento"] == equip) and gap <= 2:
-                fim = max(fim, p["Fim"]); j += 1
-            else:
-                break
-        out.append({"Equipamento": equip, "Inicio": ini, "Fim": fim})
-        i = j
-    return pd.DataFrame(out)
+def add_divisores_de_dia(fig, tmin, tmax):
+    """Linhas 00:00 e rótulo 'Dia dd/mm' — só decorativo."""
+    if tmin is None or tmax is None: return
+    tmin = pd.to_datetime(tmin); tmax = pd.to_datetime(tmax)
+    start_day = pd.to_datetime(tmin.date())
+    end_day   = pd.to_datetime(tmax.date()) + pd.Timedelta(days=1)
+    cur = start_day
+    while cur <= end_day:
+        fig.add_vline(x=cur, line_width=1, line_dash="dot", line_color="#9aa0a6")
+        mid = cur + pd.Timedelta(hours=12)
+        fig.add_annotation(x=mid, y=1.08, yref="paper",
+                           text=cur.strftime("Dia %d/%m"),
+                           showarrow=False, font=dict(size=11, color="#e0e0e0"))
+        cur += pd.Timedelta(days=1)
 
-def normalize_ascii_upper(s: str) -> str:
-    return unicodedata.normalize("NFKD", str(s)).encode("ASCII","ignore").decode("ASCII").upper()
+def janela_inicial_do_dia(data_str):
+    base_day = pd.to_datetime(data_str).normalize()
+    return base_day, base_day + pd.Timedelta(days=1)
 
-def eh_fim_de_expediente(txt: str) -> bool:
-    t = normalize_ascii_upper(txt)
-    return ("EXPEDIENTE" in t) and (("FIM" in t) or ("FINAL" in t))
+def janela_visivel(data_str, relayoutData, tmin_fallback=None):
+    """
+    Determina (x0,x1) da janela:
+      - se o usuário pan/zoom/slider → usa relayoutData;
+      - caso contrário → [data 00:00, +24h].
+    """
+    if data_str:
+        base_day = pd.to_datetime(data_str).normalize()
+    elif tmin_fallback is not None:
+        base_day = pd.to_datetime(tmin_fallback).normalize()
+    else:
+        base_day = pd.Timestamp.today().normalize()
 
-# =============== APP ===============
+    x0 = base_day; x1 = base_day + pd.Timedelta(days=1)
+    rd = relayoutData or {}
+
+    if rd.get("xaxis.autorange", False):
+        return x0, x1
+
+    if "xaxis.range[0]" in rd and "xaxis.range[1]" in rd:
+        return pd.to_datetime(rd["xaxis.range[0]"]), pd.to_datetime(rd["xaxis.range[1]"])
+
+    if "xaxis.range" in rd and isinstance(rd["xaxis.range"], (list,tuple)) and len(rd["xaxis.range"]) == 2:
+        return pd.to_datetime(rd["xaxis.range"][0]), pd.to_datetime(rd["xaxis.range"][1])
+
+    if "xaxis.rangeslider.range[0]" in rd and "xaxis.rangeslider.range[1]" in rd:
+        return pd.to_datetime(rd["xaxis.rangeslider.range[0]"]), pd.to_datetime(rd["xaxis.rangeslider.range[1]"])
+
+    return x0, x1
+
+# ===================== APP =====================
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME])
 app.title = "Linha do Tempo Operacional"
 
@@ -120,6 +153,7 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
     dbc.Container([
         html.H1("Linha do Tempo dos Operadores", className="text-center mb-4", style={"color": "#343a40", "fontWeight": "bold"}),
 
+        # Filtros
         dbc.Card(dbc.CardBody([
             dbc.Row([
                 dbc.Col(dcc.Dropdown(
@@ -140,19 +174,19 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
         dbc.Card(dbc.CardBody(id="stats-div"), className="mb-3"),
         dbc.Card(dbc.CardBody(dcc.Graph(id="grafico-linha-tempo", style={"height": "600px"}))),
 
-        # cache leve: guarda dff (agrupado) e blocos de equipamento pro operador atual
+        # cache leve: dataframe agrupado do operador
         dcc.Store(id="store-prep"),
 
-        # >>> NOVO: Tabela no rodapé (improdutivas do dia)
+        # Tabela (recorte visível + operador)
         html.Br(),
         dbc.Card(dbc.CardBody([
-            html.H4("Paradas improdutivas do dia (00:00 → 24:00)", className="mb-3"),
-            html.Div(id="tabela-improdutivas-dia")
+            html.H4("Paradas improdutivas — operador & janela visível", className="mb-3"),
+            html.Div(id="tabela-improdutivas")
         ]), className="mt-2"),
     ], fluid=False)
 ])
 
-# Atualiza lista de datas quando troca o operador
+# Atualiza a lista de datas por operador
 @app.callback(
     Output("data-dropdown", "options"),
     Output("data-dropdown", "value"),
@@ -164,7 +198,7 @@ def atualizar_datas(operador):
     val = str(datas[-2]) if len(datas) >= 2 else (str(datas[-1]) if len(datas) else None)
     return opts, val
 
-# =============== PREPARO DE DADOS (CACHE EM STORE) ===============
+# Prepara e guarda no Store o agrupado do operador
 @app.callback(
     Output("store-prep", "data"),
     Input("operador-dropdown", "value"),
@@ -172,38 +206,18 @@ def atualizar_datas(operador):
 def preparar_dados(operador):
     base = df[df["Nome"] == operador].copy()
     if base.empty:
-        return {"dff": [], "equip": [], "tmin": None, "tmax": None}
+        return {"dff": [], "tmin": None, "tmax": None}
 
     dff = agrupar_paradas(base)
     dff = dff[~dff["Descrição da Operação"].map(eh_fim_de_expediente)]  # remove "fim/final de expediente"
-    equip = blocos_equipamento(base)
 
-    # serializa datas como ISO (Dash-friendly)
+    # serializa para o Store
     dff_json = dff.assign(Inicio=dff["Inicio"].astype(str), Fim=dff["Fim"].astype(str)).to_dict("records")
-    equip_json = equip.assign(Inicio=equip["Inicio"].astype(str), Fim=equip["Fim"].astype(str)).to_dict("records")
     tmin = str(dff["Inicio"].min()) if not dff.empty else None
     tmax = str(dff["Fim"].max())    if not dff.empty else None
-    return {"dff": dff_json, "equip": equip_json, "tmin": tmin, "tmax": tmax}
+    return {"dff": dff_json, "tmin": tmin, "tmax": tmax}
 
-# =============== FIGURE (renderiza só quando troca operador/data) ===============
-def add_divisores_de_dia(fig, tmin, tmax):
-    if tmin is None or tmax is None: return
-    tmin = pd.to_datetime(tmin); tmax = pd.to_datetime(tmax)
-    start_day = pd.to_datetime(tmin.date())
-    end_day   = pd.to_datetime(tmax.date()) + pd.Timedelta(days=1)
-    cur = start_day
-    while cur <= end_day:
-        fig.add_vline(x=cur, line_width=1, line_dash="dot", line_color="#9aa0a6")
-        mid = cur + pd.Timedelta(hours=12)
-        fig.add_annotation(x=mid, y=1.08, yref="paper",
-                           text=cur.strftime("Dia %d/%m"),
-                           showarrow=False, font=dict(size=11, color="#e0e0e0"))
-        cur += pd.Timedelta(days=1)
-
-def janela_inicial_do_dia(data_str):
-    base_day = pd.to_datetime(data_str).normalize()
-    return base_day, base_day + pd.Timedelta(days=1)
-
+# Desenha figura (só quando troca operador/data)
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Input("store-prep", "data"),
@@ -211,20 +225,15 @@ def janela_inicial_do_dia(data_str):
     Input("data-dropdown", "value"),
 )
 def desenhar_fig(store, operador, data_str):
-    # reconstrói dff/equip a partir do cache
     dff = pd.DataFrame(store.get("dff", []))
-    equip = pd.DataFrame(store.get("equip", []))
-
     if not dff.empty:
         dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
 
-    # figura vazia amigável
     if dff.empty:
         fig = px.timeline(pd.DataFrame(columns=["Inicio","Fim","Nome"]), x_start="Inicio", x_end="Fim", y="Nome")
         fig.update_layout(title="Sem dados para exibir.", uirevision=f"op:{operador}")
         return fig
 
-    # gráfico principal (toda a linha do tempo → pan infinito)
     dff["Resumo"] = dff.apply(lambda r: (
         f"Operador: {r['Nome']}<br>"
         f"Equipamento: {r['Equipamento']}<br>"
@@ -245,31 +254,21 @@ def desenhar_fig(store, operador, data_str):
         }
     )
     fig.update_layout(
-        title=f"<b>Atividades de {operador}</b>",
+        title=f"<b>Atividades de {operador}</b> — pan/zoom atualiza a batelada",
         plot_bgcolor="#181818", paper_bgcolor="#181818",
         font=dict(color="#e9e9e9"), xaxis_title="Horário", yaxis_title="",
         margin=dict(l=40, r=40, t=80, b=60), height=600,
         legend=dict(orientation="v", x=1.02, y=1),
         dragmode="pan",
-        uirevision=f"op:{operador}"  # mantém pan/zoom/slider
+        uirevision=f"op:{operador}"   # preserva pan/zoom/slider
     )
     fig.update_traces(marker=dict(line=dict(width=1, color="white")))
     fig.update_yaxes(autorange="reversed")
 
-    # faixa por equipamento
-    if not equip.empty:
-        equip["Inicio"] = pd.to_datetime(equip["Inicio"]); equip["Fim"] = pd.to_datetime(equip["Fim"])
-        palette = px.colors.qualitative.Pastel + px.colors.qualitative.Set3 + px.colors.qualitative.Light24
-        eqs = equip["Equipamento"].fillna("Sem equipamento").unique().tolist()
-        cmap = {e: palette[i % len(palette)] for i, e in enumerate(eqs)}
-        for _, r in equip.iterrows():
-            fig.add_vrect(x0=r["Inicio"], x1=r["Fim"], fillcolor=cmap.get(r["Equipamento"], "#3a2e5f"),
-                          opacity=0.12, layer="below", line_width=0)
-
-    # divisores 00:00
+    # divisores 00:00 (decorativo)
     add_divisores_de_dia(fig, store.get("tmin"), store.get("tmax"))
 
-    # range inicial (pela data selecionada) — uirevision preserva depois
+    # range inicial pela data escolhida (apenas na troca de data/operador)
     if data_str:
         x0, x1 = janela_inicial_do_dia(data_str)
         fig.update_xaxes(range=[x0, x1], autorange=False)
@@ -280,68 +279,99 @@ def desenhar_fig(store, operador, data_str):
 
     return fig
 
-# =============== TABELA: IMPRODUTIVAS DO DIA (TODOS OPERADORES) ===============
+# Cards do topo (batelada = janela visível)
 @app.callback(
-    Output("tabela-improdutivas-dia", "children"),
+    Output("stats-div", "children"),
+    Input("store-prep", "data"),
+    Input("operador-dropdown", "value"),
     Input("data-dropdown", "value"),
+    Input("grafico-linha-tempo", "relayoutData"),
 )
-def tabela_improdutivas_dia(data_str):
-    if not data_str:
-        return html.Div("Selecione uma data.", className="text-center text-muted p-2")
-
-    # janela do dia
-    dia0 = pd.to_datetime(data_str).normalize()
-    dia1 = dia0 + pd.Timedelta(days=1)
-
-    # pega tudo que SOBREPÕE o dia
-    base = df[(df["Fim"] > dia0) & (df["Inicio"] < dia1)].copy()
-    if base.empty:
-        return html.Div("Nenhuma ocorrência improdutiva nesse dia.", className="text-center text-muted p-2")
-
-    # exclui 'fim/final de expediente'
-    base = base[~base["Descrição da Operação"].map(eh_fim_de_expediente)]
-    if base.empty:
-        return html.Div("Nenhuma ocorrência improdutiva nesse dia.", className="text-center text-muted p-2")
-
-    # recorta para o dia
-    base["Inicio"] = base["Inicio"].clip(lower=dia0)
-    base["Fim"]    = base["Fim"].clip(upper=dia1)
-    base = base[(base["Fim"] > base["Inicio"])]
-
-    # agrupa blocos contíguos por Nome + Operação + Equipamento (contagem de ocorrências justa)
-    dff = agrupar_paradas(base)
-
-    # mantém apenas improdutivas (todas as não-efetivas improdutivas)
-    alvo = {"Parada Mecânica","Parada Gerenciável","Parada Essencial","Parada Improdutiva"}
-    dff = dff[dff["Tipo Parada"].isin(alvo)]
+def atualizar_cards(store, operador, data_str, relayoutData):
+    dff = pd.DataFrame(store.get("dff", []))
     if dff.empty:
-        return html.Div("Nenhuma ocorrência improdutiva nesse dia.", className="text-center text-muted p-2")
+        return html.Div("Sem dados para o operador selecionado.", className="text-center text-muted p-3")
+    dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
 
-    # somas + contagens
-    resumo = (dff
-              .groupby(["Tipo Parada","Descrição da Operação"], as_index=False)
-              .agg(Minutos=("Duracao Min","sum"), Ocorrências=("Descrição da Operação","count")))
+    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
 
-    # arredonda minutos
-    resumo["Minutos"] = (resumo["Minutos"]).round(0).astype(int)
+    dff["Inicio_clip"] = dff["Inicio"].clip(lower=x0)
+    dff["Fim_clip"]    = dff["Fim"].clip(upper=x1)
+    dff["Duracao Min Clip"] = (dff["Fim_clip"] - dff["Inicio_clip"]).dt.total_seconds() / 60.0
+    win = dff[dff["Duracao Min Clip"] > 0].copy()
 
-    # ordena: por tipo, depois por minutos desc
+    if win.empty:
+        return html.Div("Sem atividade nessa janela.", className="text-center text-muted p-3")
+
+    ini_batelada = win["Inicio_clip"].min().strftime("%d/%m %H:%M")
+    fim_batelada = win["Fim_clip"].max().strftime("%d/%m %H:%M")
+    total_horas  = win["Duracao Min Clip"].sum() / 60.0
+
+    def soma_h(tipo):
+        return win.loc[win["Tipo Parada"] == tipo, "Duracao Min Clip"].sum() / 60.0
+
+    def card(t, v, c):
+        return dbc.Col(dbc.Card(dbc.CardBody([
+            html.H4(v, style={"color": c, "fontWeight": "bold"}),
+            html.P(t, className="text-muted")
+        ]), className="text-center shadow-sm"), md=2, className="mb-2")
+
+    return dbc.Row([
+        card("Início da batelada", ini_batelada, "#6c757d"),
+        card("Fim da batelada",    fim_batelada, "#6c757d"),
+        card("Total (janela)",     f"{total_horas:.2f}h", "#343a40"),
+        card("Efetivo",            f"{soma_h('Efetivo'):.2f}h", "#046414"),
+        card("Gerenciável",        f"{soma_h('Parada Gerenciável'):.2f}h", "#B26B00"),
+        card("Mecânica",           f"{soma_h('Parada Mecânica'):.2f}h", "#A52657"),
+    ], justify="center")
+
+# Tabela improdutivas (OPERADOR + JANELA VISÍVEL)
+@app.callback(
+    Output("tabela-improdutivas", "children"),
+    Input("store-prep", "data"),                   # já filtrado por operador
+    Input("operador-dropdown", "value"),
+    Input("data-dropdown", "value"),
+    Input("grafico-linha-tempo", "relayoutData"),  # pan/zoom/slider
+)
+def tabela_improdutivas(store, operador, data_str, relayoutData):
+    dff = pd.DataFrame(store.get("dff", []))
+    if dff.empty:
+        return html.Div("Sem dados para o operador selecionado.", className="text-center text-muted p-2")
+
+    dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+
+    # janela atual
+    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
+
+    # recorte por janela
+    dff["Inicio_clip"] = dff["Inicio"].clip(lower=x0)
+    dff["Fim_clip"]    = dff["Fim"].clip(upper=x1)
+    dff["Duracao Min Clip"] = (dff["Fim_clip"] - dff["Inicio_clip"]).dt.total_seconds() / 60.0
+    win = dff[dff["Duracao Min Clip"] > 0].copy()
+
+    # apenas improdutivas (inclui a residual "Parada Improdutiva")
+    alvo = {"Parada Mecânica", "Parada Gerenciável", "Parada Essencial", "Parada Improdutiva"}
+    win = win[win["Tipo Parada"].isin(alvo)]
+    if win.empty:
+        return html.Div("Sem improdutivas nessa janela.", className="text-center text-muted p-2")
+
+    # consolidação: minutos somados + nº de ocorrências (conta blocos)
+    resumo = (win.groupby(["Tipo Parada","Descrição da Operação"], as_index=False)
+                 .agg(Minutos=("Duracao Min Clip","sum"),
+                      Ocorrências=("Duracao Min Clip","count")))
+    resumo["Minutos"] = resumo["Minutos"].round(0).astype(int)
+
+    # ordenação
     tipo_ordem = {"Parada Gerenciável":1, "Parada Mecânica":2, "Parada Essencial":3, "Parada Improdutiva":4}
     resumo["ord"] = resumo["Tipo Parada"].map(tipo_ordem).fillna(9)
     resumo = resumo.sort_values(["ord","Minutos"], ascending=[True, False]).drop(columns=["ord"])
 
-    # renomeia colunas p/ exibir
-    resumo = resumo.rename(columns={
-        "Tipo Parada":"Tipo",
-        "Descrição da Operação":"Apontamento"
-    })
-
-    # tabela Bootstrap
+    resumo = resumo.rename(columns={"Tipo Parada":"Tipo","Descrição da Operação":"Apontamento"})
     return dbc.Table.from_dataframe(
         resumo[["Tipo","Apontamento","Minutos","Ocorrências"]],
         striped=True, bordered=True, hover=True, className="table-sm"
     )
 
-# =============== RUN ===============
+# ===================== RUN =====================
 if __name__ == "__main__":
     app.run_server(debug=True)
