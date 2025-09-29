@@ -2,7 +2,7 @@ import pandas as pd
 import plotly.express as px
 import dash
 from dash import dcc, html, ctx
-from dash.dependencies import Input, Output
+from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
 from datetime import timedelta
 import unicodedata
@@ -110,6 +110,10 @@ def janela_inicial_do_dia(data_str):
     return base_day, base_day + pd.Timedelta(days=1)
 
 def janela_visivel(data_str, relayoutData, tmin_fallback=None):
+    """
+    Retorna (x0, x1) da janela atualmente visível no gráfico,
+    usando pan/zoom/range-slider se houver, ou [data 00:00, +24h] como fallback.
+    """
     if data_str:
         base_day = pd.to_datetime(data_str).normalize()
     elif tmin_fallback is not None:
@@ -165,7 +169,7 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
             ], align="center"),
 
             html.Hr(),
-            html.H5("Máquinas (equipamentos) nessa data — desligue para ocultar do gráfico/tabela"),
+            html.H5("Máquinas (equipamentos) na janela visível — desligue para ocultar do gráfico/tabela"),
             dbc.Row([
                 dbc.Col(dcc.Dropdown(
                     id="equipamentos-checklist",
@@ -222,27 +226,38 @@ def preparar_dados(operador):
     tmax = str(dff["Fim"].max())    if not dff.empty else None
     return {"dff": dff_json, "tmin": tmin, "tmax": tmax}
 
-# === NOVO: opções/valor do filtro de máquinas (por dia) ===
+# === NOVO: opções/valor do filtro de máquinas (com base na JANELA VISÍVEL) ===
 @app.callback(
     Output("equipamentos-checklist", "options"),
     Output("equipamentos-checklist", "value"),
     Input("store-prep", "data"),
     Input("data-dropdown", "value"),
+    Input("grafico-linha-tempo", "relayoutData"),
+    State("equipamentos-checklist", "value"),
 )
-def atualizar_equipamentos(store, data_str):
+def atualizar_equipamentos(store, data_str, relayoutData, sel_prev):
     dff = pd.DataFrame(store.get("dff", []))
     if dff.empty or not data_str:
         return [], []
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
 
-    # máquinas que têm qualquer interseção com a janela do dia (00:00 → +24h)
-    x0, x1 = janela_inicial_do_dia(data_str)
+    # Máquinas que têm qualquer interseção com a JANELA VISÍVEL
+    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
     mask = (dff["Fim"] > x0) & (dff["Inicio"] < x1)
     usados = sorted(dff.loc[mask, "Equipamento"].dropna().unique().tolist())
     opts = [{"label": e, "value": e} for e in usados]
-    return opts, usados  # por padrão, todas selecionadas
 
-# Desenha figura (agora respeitando filtro de máquinas)
+    # Preserva seleção anterior quando possível
+    if sel_prev is None:
+        return opts, usados  # 1ª render: todas
+    inter = [v for v in (sel_prev or []) if v in usados]
+    # Se a janela mudou e nada da seleção antiga existe mais, volta pra todas
+    # (a menos que o usuário tenha limpado manualmente: sel_prev == [])
+    if not inter and sel_prev != []:
+        inter = usados
+    return opts, inter
+
+# Desenha figura (respeitando filtro de máquinas e mantendo pan/zoom)
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Input("store-prep", "data"),
@@ -293,22 +308,25 @@ def desenhar_fig(store, operador, data_str, equips_sel):
         margin=dict(l=40, r=40, t=80, b=60), height=600,
         legend=dict(orientation="v", x=1.02, y=1),
         dragmode="pan",
-        uirevision=f"op:{operador}|eq:{len(equips_sel) if equips_sel else 0}"
+        uirevision=f"op:{operador}"   # mantém pan/zoom ao ligar/desligar máquinas
     )
     fig.update_traces(marker=dict(line=dict(width=1, color="white")))
     fig.update_yaxes(autorange="reversed")
 
+    # divisores 00:00 (decorativo)
     add_divisores_de_dia(fig, store.get("tmin"), store.get("tmax"))
 
+    # range inicial pela data escolhida (apenas na troca de data/operador)
     if data_str:
         x0, x1 = janela_inicial_do_dia(data_str)
         fig.update_xaxes(range=[x0, x1], autorange=False)
 
+    # slider + spikes
     fig.update_xaxes(rangeslider_visible=True, showspikes=True,
                      spikemode="across", spikecolor="#bbb", spikedash="dot")
     return fig
 
-# Cards do topo (batelada = janela visível) — agora respeitando máquinas selecionadas
+# Cards do topo (batelada = janela visível) — respeitando máquinas selecionadas
 @app.callback(
     Output("stats-div", "children"),
     Input("store-prep", "data"),
@@ -360,7 +378,7 @@ def atualizar_cards(store, operador, data_str, relayoutData, equips_sel):
         card("Mecânica",           f"{soma_h('Parada Mecânica'):.2f}h", "#A52657"),
     ], justify="center")
 
-# === NOVO: Resumo por máquina (horas na janela visível) ===
+# Resumo por máquina (horas na janela visível)
 @app.callback(
     Output("resumo-maquinas-div", "children"),
     Input("store-prep", "data"),
