@@ -14,7 +14,7 @@ SHEET   = "Plan1"
 # ===================== CARGA & LIMPEZA =====================
 df = pd.read_excel(ARQUIVO, sheet_name=SHEET)
 
-# Equipamento (apenas visual; NÃO filtramos por ele)
+# Equipamento (agora também pode ser filtrado)
 df["Equipamento"] = df["Código Equipamento"].astype(str) + " - " + df["Descrição do Equipamento"]
 
 # Parsing
@@ -45,7 +45,7 @@ def classifica_tipo_parada(row):
         if desc in mecanicas:    return "Parada Mecânica"
         if desc in essenciais:   return "Parada Essencial"
         if desc == "OUTROS":     return "Outros"
-        return "Parada Improdutiva"  # improdutivas que não são mec/gerenc/essenciais
+        return "Parada Improdutiva"
     if desc == "DESLOCAMENTO":  return "Deslocamento"
     if desc == "MANOBRA":       return "Manobra"
     return "Outro"
@@ -63,7 +63,7 @@ def eh_fim_de_expediente(txt: str) -> bool:
 def agrupar_paradas(df_filtrado):
     """
     Colapsa blocos contíguos da MESMA operação, MESMO equipamento e MESMO operador (gap <= 2min).
-    Retorna linhas com: Nome, Inicio, Fim, Descrição da Operação, Duracao Min, Tipo Parada, Equipamento.
+    Retorna: Nome, Inicio, Fim, Descrição da Operação, Duracao Min, Tipo Parada, Equipamento.
     """
     if df_filtrado.empty:
         return pd.DataFrame(columns=["Nome","Inicio","Fim","Descrição da Operação","Duracao Min","Tipo Parada","Equipamento"])
@@ -92,7 +92,6 @@ def agrupar_paradas(df_filtrado):
     return pd.DataFrame(out)
 
 def add_divisores_de_dia(fig, tmin, tmax):
-    """Linhas 00:00 e rótulo 'Dia dd/mm' — só decorativo."""
     if tmin is None or tmax is None: return
     tmin = pd.to_datetime(tmin); tmax = pd.to_datetime(tmax)
     start_day = pd.to_datetime(tmin.date())
@@ -111,11 +110,6 @@ def janela_inicial_do_dia(data_str):
     return base_day, base_day + pd.Timedelta(days=1)
 
 def janela_visivel(data_str, relayoutData, tmin_fallback=None):
-    """
-    Determina (x0,x1) da janela:
-      - se o usuário pan/zoom/slider → usa relayoutData;
-      - caso contrário → [data 00:00, +24h].
-    """
     if data_str:
         base_day = pd.to_datetime(data_str).normalize()
     elif tmin_fallback is not None:
@@ -168,7 +162,19 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
                     value=data_padrao,
                     placeholder="Data inicial (00:00 → +24h)"
                 ), md=6),
-            ], align="center")
+            ], align="center"),
+
+            html.Hr(),
+            html.H5("Máquinas (equipamentos) nessa data — desligue para ocultar do gráfico/tabela"),
+            dbc.Row([
+                dbc.Col(dcc.Dropdown(
+                    id="equipamentos-checklist",
+                    options=[], value=[],
+                    multi=True, placeholder="Selecione as máquinas (padrão: todas)",
+                    maxHeight=250
+                ), md=8),
+                dbc.Col(html.Div(id="resumo-maquinas-div"), md=4)
+            ], align="center"),
         ]), className="mb-3"),
 
         dbc.Card(dbc.CardBody(id="stats-div"), className="mb-3"),
@@ -211,20 +217,40 @@ def preparar_dados(operador):
     dff = agrupar_paradas(base)
     dff = dff[~dff["Descrição da Operação"].map(eh_fim_de_expediente)]  # remove "fim/final de expediente"
 
-    # serializa para o Store
     dff_json = dff.assign(Inicio=dff["Inicio"].astype(str), Fim=dff["Fim"].astype(str)).to_dict("records")
     tmin = str(dff["Inicio"].min()) if not dff.empty else None
     tmax = str(dff["Fim"].max())    if not dff.empty else None
     return {"dff": dff_json, "tmin": tmin, "tmax": tmax}
 
-# Desenha figura (só quando troca operador/data)
+# === NOVO: opções/valor do filtro de máquinas (por dia) ===
+@app.callback(
+    Output("equipamentos-checklist", "options"),
+    Output("equipamentos-checklist", "value"),
+    Input("store-prep", "data"),
+    Input("data-dropdown", "value"),
+)
+def atualizar_equipamentos(store, data_str):
+    dff = pd.DataFrame(store.get("dff", []))
+    if dff.empty or not data_str:
+        return [], []
+    dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+
+    # máquinas que têm qualquer interseção com a janela do dia (00:00 → +24h)
+    x0, x1 = janela_inicial_do_dia(data_str)
+    mask = (dff["Fim"] > x0) & (dff["Inicio"] < x1)
+    usados = sorted(dff.loc[mask, "Equipamento"].dropna().unique().tolist())
+    opts = [{"label": e, "value": e} for e in usados]
+    return opts, usados  # por padrão, todas selecionadas
+
+# Desenha figura (agora respeitando filtro de máquinas)
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Input("store-prep", "data"),
     Input("operador-dropdown", "value"),
     Input("data-dropdown", "value"),
+    Input("equipamentos-checklist", "value"),
 )
-def desenhar_fig(store, operador, data_str):
+def desenhar_fig(store, operador, data_str, equips_sel):
     dff = pd.DataFrame(store.get("dff", []))
     if not dff.empty:
         dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
@@ -233,6 +259,12 @@ def desenhar_fig(store, operador, data_str):
         fig = px.timeline(pd.DataFrame(columns=["Inicio","Fim","Nome"]), x_start="Inicio", x_end="Fim", y="Nome")
         fig.update_layout(title="Sem dados para exibir.", uirevision=f"op:{operador}")
         return fig
+
+    # aplica filtro de máquinas (se nenhum selecionado, fica vazio)
+    if equips_sel:
+        dff = dff[dff["Equipamento"].isin(equips_sel)]
+    else:
+        dff = dff.iloc[0:0]
 
     dff["Resumo"] = dff.apply(lambda r: (
         f"Operador: {r['Nome']}<br>"
@@ -250,7 +282,8 @@ def desenhar_fig(store, operador, data_str):
         color_discrete_map={
             "Efetivo": "#046414", "Parada Gerenciável": "#FF9393", "Parada Mecânica": "#A52657",
             "Parada Improdutiva": "#FF0000", "Parada Essencial": "#0026FF",
-            "Deslocamento": "#ffee00", "Manobra": "#93c9f7", "Outros": "#8C8C8C", "Outro": "#222"
+            "Deslocamento": "#ffee00", "Manobra": "#93c9f7",
+            "Outros": "#8C8C8C", "Outro": "#222"
         }
     )
     fig.update_layout(
@@ -260,38 +293,40 @@ def desenhar_fig(store, operador, data_str):
         margin=dict(l=40, r=40, t=80, b=60), height=600,
         legend=dict(orientation="v", x=1.02, y=1),
         dragmode="pan",
-        uirevision=f"op:{operador}"   # preserva pan/zoom/slider
+        uirevision=f"op:{operador}|eq:{len(equips_sel) if equips_sel else 0}"
     )
     fig.update_traces(marker=dict(line=dict(width=1, color="white")))
     fig.update_yaxes(autorange="reversed")
 
-    # divisores 00:00 (decorativo)
     add_divisores_de_dia(fig, store.get("tmin"), store.get("tmax"))
 
-    # range inicial pela data escolhida (apenas na troca de data/operador)
     if data_str:
         x0, x1 = janela_inicial_do_dia(data_str)
         fig.update_xaxes(range=[x0, x1], autorange=False)
 
-    # slider + spikes
     fig.update_xaxes(rangeslider_visible=True, showspikes=True,
                      spikemode="across", spikecolor="#bbb", spikedash="dot")
-
     return fig
 
-# Cards do topo (batelada = janela visível)
+# Cards do topo (batelada = janela visível) — agora respeitando máquinas selecionadas
 @app.callback(
     Output("stats-div", "children"),
     Input("store-prep", "data"),
     Input("operador-dropdown", "value"),
     Input("data-dropdown", "value"),
     Input("grafico-linha-tempo", "relayoutData"),
+    Input("equipamentos-checklist", "value"),
 )
-def atualizar_cards(store, operador, data_str, relayoutData):
+def atualizar_cards(store, operador, data_str, relayoutData, equips_sel):
     dff = pd.DataFrame(store.get("dff", []))
     if dff.empty:
         return html.Div("Sem dados para o operador selecionado.", className="text-center text-muted p-3")
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+
+    if equips_sel:
+        dff = dff[dff["Equipamento"].isin(equips_sel)]
+    else:
+        return html.Div("Nenhuma máquina selecionada.", className="text-center text-muted p-3")
 
     x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
 
@@ -325,20 +360,67 @@ def atualizar_cards(store, operador, data_str, relayoutData):
         card("Mecânica",           f"{soma_h('Parada Mecânica'):.2f}h", "#A52657"),
     ], justify="center")
 
-# Tabela improdutivas (OPERADOR + JANELA VISÍVEL)
+# === NOVO: Resumo por máquina (horas na janela visível) ===
+@app.callback(
+    Output("resumo-maquinas-div", "children"),
+    Input("store-prep", "data"),
+    Input("data-dropdown", "value"),
+    Input("grafico-linha-tempo", "relayoutData"),
+    Input("equipamentos-checklist", "value"),
+)
+def resumo_maquinas(store, data_str, relayoutData, equips_sel):
+    dff = pd.DataFrame(store.get("dff", []))
+    if dff.empty or not data_str or not equips_sel:
+        return html.Div("Sem máquinas selecionadas.", className="text-muted")
+
+    dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+    dff = dff[dff["Equipamento"].isin(equips_sel)]
+
+    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
+
+    dff["Inicio_clip"] = dff["Inicio"].clip(lower=x0)
+    dff["Fim_clip"]    = dff["Fim"].clip(upper=x1)
+    dff["Min_clip"]    = (dff["Fim_clip"] - dff["Inicio_clip"]).dt.total_seconds() / 60.0
+    win = dff[dff["Min_clip"] > 0].copy()
+
+    if win.empty:
+        return html.Div("Sem atividade na janela.", className="text-muted")
+
+    g = (win.groupby("Equipamento", as_index=False)["Min_clip"].sum()
+            .sort_values("Min_clip", ascending=False))
+    g["Horas"] = (g["Min_clip"] / 60.0).round(2)
+    g = g.drop(columns=["Min_clip"])
+
+    table = dbc.Table.from_dataframe(
+        g.rename(columns={"Equipamento": "Equip.", "Horas": "Horas (janela)"}),
+        striped=True, bordered=True, hover=True, className="table-sm mb-0"
+    )
+    return html.Div([
+        html.H6("Resumo por máquina", className="mb-2"),
+        table
+    ])
+
+# Tabela improdutivas (OPERADOR + JANELA VISÍVEL + MÁQUINAS SELECIONADAS)
 @app.callback(
     Output("tabela-improdutivas", "children"),
-    Input("store-prep", "data"),                   # já filtrado por operador
+    Input("store-prep", "data"),
     Input("operador-dropdown", "value"),
     Input("data-dropdown", "value"),
-    Input("grafico-linha-tempo", "relayoutData"),  # pan/zoom/slider
+    Input("grafico-linha-tempo", "relayoutData"),
+    Input("equipamentos-checklist", "value"),
 )
-def tabela_improdutivas(store, operador, data_str, relayoutData):
+def tabela_improdutivas(store, operador, data_str, relayoutData, equips_sel):
     dff = pd.DataFrame(store.get("dff", []))
     if dff.empty:
         return html.Div("Sem dados para o operador selecionado.", className="text-center text-muted p-2")
 
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+
+    # aplica filtro de máquinas
+    if equips_sel:
+        dff = dff[dff["Equipamento"].isin(equips_sel)]
+    else:
+        return html.Div("Nenhuma máquina selecionada.", className="text-center text-muted p-2")
 
     # janela atual
     x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
@@ -349,19 +431,17 @@ def tabela_improdutivas(store, operador, data_str, relayoutData):
     dff["Duracao Min Clip"] = (dff["Fim_clip"] - dff["Inicio_clip"]).dt.total_seconds() / 60.0
     win = dff[dff["Duracao Min Clip"] > 0].copy()
 
-    # apenas improdutivas (inclui a residual "Parada Improdutiva")
+    # apenas improdutivas
     alvo = {"Parada Mecânica", "Parada Gerenciável", "Parada Essencial", "Parada Improdutiva"}
     win = win[win["Tipo Parada"].isin(alvo)]
     if win.empty:
         return html.Div("Sem improdutivas nessa janela.", className="text-center text-muted p-2")
 
-    # consolidação: minutos somados + nº de ocorrências (conta blocos)
     resumo = (win.groupby(["Tipo Parada","Descrição da Operação"], as_index=False)
                  .agg(Minutos=("Duracao Min Clip","sum"),
                       Ocorrências=("Duracao Min Clip","count")))
     resumo["Minutos"] = resumo["Minutos"].round(0).astype(int)
 
-    # ordenação
     tipo_ordem = {"Parada Gerenciável":1, "Parada Mecânica":2, "Parada Essencial":3, "Parada Improdutiva":4}
     resumo["ord"] = resumo["Tipo Parada"].map(tipo_ordem).fillna(9)
     resumo = resumo.sort_values(["ord","Minutos"], ascending=[True, False]).drop(columns=["ord"])
