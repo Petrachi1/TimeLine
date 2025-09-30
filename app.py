@@ -14,7 +14,7 @@ SHEET   = "Plan1"
 # ===================== CARGA & LIMPEZA =====================
 df = pd.read_excel(ARQUIVO, sheet_name=SHEET)
 
-# Equipamento (string amigável para filtrar/mostrar)
+# Equipamento (string amigável)
 df["Equipamento"] = df["Código Equipamento"].astype(str) + " - " + df["Descrição do Equipamento"]
 
 # Parsing
@@ -112,7 +112,7 @@ def janela_inicial_do_dia(data_str):
 def janela_visivel(data_str, relayoutData, tmin_fallback=None):
     """
     Retorna (x0, x1) da janela visível do gráfico.
-    Sem interação ainda → [data 00:00, +24h] ou tmin_fallback.
+    Sem interação → [data 00:00, +24h] (ou tmin_fallback).
     """
     if data_str:
         base_day = pd.to_datetime(data_str).normalize()
@@ -138,10 +138,10 @@ def janela_visivel(data_str, relayoutData, tmin_fallback=None):
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP, dbc.icons.FONT_AWESOME])
 app.title = "Linha do Tempo Operacional"
 
-# Valores iniciais
+# Valores iniciais (só para preencher os dropdowns)
 primeiro_nome = sorted(df["Nome"].dropna().unique())[0]
 primeiras_datas = sorted(df[df["Nome"] == primeiro_nome]["Data Hora Local"].dt.date.unique())
-data_padrao = str(primeiras_datas[-2]) if len(primeiras_datas) >= 2 else str(primeiras_datas[-1])
+data_padrao = str(primeiras_datas[-1]) if len(primeiras_datas) else None
 
 app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, children=[
     dbc.Container([
@@ -160,17 +160,17 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
                     id="data-dropdown",
                     options=[{"label": str(d), "value": str(d)} for d in primeiras_datas],
                     value=data_padrao,
-                    placeholder="Data inicial (00:00 → +24h)"
+                    placeholder="Selecione um dia para focar (zoom)"
                 ), md=6),
             ], align="center"),
 
             html.Hr(),
-            html.H5("Máquinas (equipamentos) na janela visível — desligue para ocultar do gráfico/tabela"),
+            html.H5("Máquinas (equipamentos) do operador — desligue para ocultar do gráfico/tabela"),
             dbc.Row([
                 dbc.Col(dcc.Dropdown(
                     id="equipamentos-checklist",
-                    options=[], value=[],
-                    multi=True, placeholder="Selecione as máquinas (padrão: todas)"
+                    options=[], value=[], multi=True,
+                    placeholder="Todas as máquinas (padrão)"
                 ), md=8),
                 dbc.Col(html.Div(id="resumo-maquinas-div"), md=4)
             ], align="center"),
@@ -179,10 +179,10 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
         dbc.Card(dbc.CardBody(id="stats-div"), className="mb-3"),
         dbc.Card(dbc.CardBody(dcc.Graph(id="grafico-linha-tempo", style={"height": "600px"}))),
 
-        # cache leve: dataframe agrupado do operador
+        # cache leve do operador
         dcc.Store(id="store-prep"),
 
-        # Tabela (recorte visível + operador)
+        # Tabela
         html.Br(),
         dbc.Card(dbc.CardBody([
             html.H4("Paradas improdutivas — operador & janela visível", className="mb-3"),
@@ -191,7 +191,7 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
     ], fluid=False)
 ])
 
-# Atualiza a lista de datas por operador
+# Atualiza a lista de datas por operador (apenas para o seletor de zoom)
 @app.callback(
     Output("data-dropdown", "options"),
     Output("data-dropdown", "value"),
@@ -200,10 +200,10 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
 def atualizar_datas(operador):
     datas = sorted(df[df["Nome"] == operador]["Data Hora Local"].dt.date.unique())
     opts = [{"label": str(d), "value": str(d)} for d in datas]
-    val = str(datas[-2]) if len(datas) >= 2 else (str(datas[-1]) if len(datas) else None)
+    val = str(datas[-1]) if len(datas) else None
     return opts, val
 
-# Prepara e guarda no Store o agrupado do operador
+# Prepara e guarda no Store o agrupado COMPLETO do operador + máquinas usadas
 @app.callback(
     Output("store-prep", "data"),
     Input("operador-dropdown", "value"),
@@ -211,52 +211,45 @@ def atualizar_datas(operador):
 def preparar_dados(operador):
     base = df[df["Nome"] == operador].copy()
     if base.empty:
-        return {"dff": [], "tmin": None, "tmax": None}
+        return {"dff": [], "tmin": None, "tmax": None, "equip_all": []}
 
     dff = agrupar_paradas(base)
-    dff = dff[~dff["Descrição da Operação"].map(eh_fim_de_expediente)]  # remove "fim/final de expediente"
+    dff = dff[~dff["Descrição da Operação"].map(eh_fim_de_expediente)]  # limpa "fim/final de expediente"
 
+    tmin = dff["Inicio"].min()
+    tmax = dff["Fim"].max()
+    equip_all = sorted(dff["Equipamento"].dropna().unique().tolist())
+
+    # serializa para Store
     dff_json = dff.assign(Inicio=dff["Inicio"].astype(str), Fim=dff["Fim"].astype(str)).to_dict("records")
-    tmin = str(dff["Inicio"].min()) if not dff.empty else None
-    tmax = str(dff["Fim"].max())    if not dff.empty else None
-    return {"dff": dff_json, "tmin": tmin, "tmax": tmax}
+    return {
+        "dff": dff_json,
+        "tmin": str(tmin) if pd.notnull(tmin) else None,
+        "tmax": str(tmax) if pd.notnull(tmax) else None,
+        "equip_all": equip_all
+    }
 
-# === Filtro de máquinas baseado na JANELA VISÍVEL (com fallback tmin→tmax na 1ª carga) ===
+# Filtro de máquinas: lista TODAS as máquinas do operador (não depende da janela)
 @app.callback(
     Output("equipamentos-checklist", "options"),
     Output("equipamentos-checklist", "value"),
     Input("store-prep", "data"),
-    Input("data-dropdown", "value"),
-    Input("grafico-linha-tempo", "relayoutData"),
     State("equipamentos-checklist", "value"),
 )
-def atualizar_equipamentos(store, data_str, relayoutData, sel_prev):
-    dff = pd.DataFrame(store.get("dff", []))
-    if dff.empty:
-        return [], []
-
-    dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
-
-    # 1ª render (sem interação): usar todo o período do operador; depois, a janela visível
-    if relayoutData is None and store.get("tmin") and store.get("tmax"):
-        x0 = pd.to_datetime(store["tmin"]).normalize()
-        x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
-    else:
-        x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
-
-    mask = (dff["Fim"] > x0) & (dff["Inicio"] < x1)
-    usados = sorted(dff.loc[mask, "Equipamento"].dropna().unique().tolist())
-    opts = [{"label": e, "value": e} for e in usados]
-
-    # Preserva seleção anterior quando possível
+def atualizar_equipamentos(store, sel_prev):
+    opts = [{"label": e, "value": e} for e in store.get("equip_all", [])]
+    # 1ª render do operador: seleciona todas; senão preserva interseção
     if sel_prev is None:
-        return opts, usados  # 1ª render: todas
-    inter = [v for v in (sel_prev or []) if v in usados]
+        return opts, store.get("equip_all", [])
+    inter = [v for v in (sel_prev or []) if v in store.get("equip_all", [])]
     if not inter and sel_prev != []:
-        inter = usados  # se janela mudou e esvaziou, volta pra todas (a menos que usuário tenha limpado)
+        inter = store.get("equip_all", [])
     return opts, inter
 
-# Desenha figura (respeita máquinas e não reseta pan/zoom)
+# Desenha o gráfico:
+# - troca de operador → mostra PERÍODO COMPLETO do operador
+# - troca de data → dá ZOOM no dia selecionado
+# - filtro de máquinas → oculta/mostra trilhas sem resetar o zoom
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Input("store-prep", "data"),
@@ -266,19 +259,23 @@ def atualizar_equipamentos(store, data_str, relayoutData, sel_prev):
 )
 def desenhar_fig(store, operador, data_str, equips_sel):
     dff = pd.DataFrame(store.get("dff", []))
-    if not dff.empty:
-        dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
-
     if dff.empty:
         fig = px.timeline(pd.DataFrame(columns=["Inicio","Fim","Nome"]), x_start="Inicio", x_end="Fim", y="Nome")
         fig.update_layout(title="Sem dados para exibir.", uirevision=f"op:{operador}")
         return fig
 
-    # aplica filtro de máquinas
-    if equips_sel:
-        dff = dff[dff["Equipamento"].isin(equips_sel)]
-    else:
-        dff = dff.iloc[0:0]
+    dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+
+    # aplica filtro de máquinas (padrão = todas)
+    equips_all = store.get("equip_all", [])
+    if not equips_sel:  # [] ou None → usa todas
+        equips_sel = equips_all
+    dff = dff[dff["Equipamento"].isin(equips_sel)]
+
+    if dff.empty:
+        fig = px.timeline(pd.DataFrame(columns=["Inicio","Fim","Nome"]), x_start="Inicio", x_end="Fim", y="Nome")
+        fig.update_layout(title="Sem dados (máquinas filtradas).", uirevision=f"op:{operador}")
+        return fig
 
     dff["Resumo"] = dff.apply(lambda r: (
         f"Operador: {r['Nome']}<br>"
@@ -301,37 +298,37 @@ def desenhar_fig(store, operador, data_str, equips_sel):
         }
     )
     fig.update_layout(
-        title=f"<b>Atividades de {operador}</b> — pan/zoom atualiza a batelada",
+        title=f"<b>Atividades de {operador}</b> — use o seletor de DATA para dar zoom",
         plot_bgcolor="#181818", paper_bgcolor="#181818",
         font=dict(color="#e9e9e9"), xaxis_title="Horário", yaxis_title="",
         margin=dict(l=40, r=40, t=80, b=60), height=600,
         legend=dict(orientation="v", x=1.02, y=1),
         dragmode="pan",
-        uirevision=f"op:{operador}"   # mantém pan/zoom ao alterar máquinas
+        uirevision=f"op:{operador}"   # NÃO reseta pan/zoom ao mexer no filtro de máquinas
     )
     fig.update_traces(marker=dict(line=dict(width=1, color="white")))
     fig.update_yaxes(autorange="reversed")
 
     add_divisores_de_dia(fig, store.get("tmin"), store.get("tmax"))
 
-    # Range inicial:
+    # Range:
     trig = ctx.triggered_id
-    if store.get("tmin") and store.get("tmax"):
-        if trig in (None, "store-prep", "operador-dropdown"):
-            # 1ª carga / troca de operador → todo período do operador
-            x0_full = pd.to_datetime(store["tmin"]).normalize()
-            x1_full = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
-            fig.update_xaxes(range=[x0_full, x1_full], autorange=False)
-    if trig == "data-dropdown" and data_str:
-        # se escolher uma data, focar no dia
-        x0_day, x1_day = janela_inicial_do_dia(data_str)
-        fig.update_xaxes(range=[x0_day, x1_day], autorange=False)
+    if trig in (None, "store-prep", "operador-dropdown"):
+        # operador mudou → mostra PERÍODO COMPLETO
+        if store.get("tmin") and store.get("tmax"):
+            x0 = pd.to_datetime(store["tmin"]).normalize()
+            x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
+            fig.update_xaxes(range=[x0, x1], autorange=False)
+    elif trig == "data-dropdown" and data_str:
+        # data selecionada → ZOOM no dia
+        x0, x1 = janela_inicial_do_dia(data_str)
+        fig.update_xaxes(range=[x0, x1], autorange=False)
 
     fig.update_xaxes(rangeslider_visible=True, showspikes=True,
                      spikemode="across", spikecolor="#bbb", spikedash="dot")
     return fig
 
-# Cards do topo (janela visível + máquinas selecionadas)
+# Cards (usam a janela visível; na 1ª carga, usam período completo)
 @app.callback(
     Output("stats-div", "children"),
     Input("store-prep", "data"),
@@ -344,14 +341,14 @@ def atualizar_cards(store, operador, data_str, relayoutData, equips_sel):
     dff = pd.DataFrame(store.get("dff", []))
     if dff.empty:
         return html.Div("Sem dados para o operador selecionado.", className="text-center text-muted p-3")
+
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+    equips_all = store.get("equip_all", [])
+    if not equips_sel:
+        equips_sel = equips_all
+    dff = dff[dff["Equipamento"].isin(equips_sel)]
 
-    if equips_sel:
-        dff = dff[dff["Equipamento"].isin(equips_sel)]
-    else:
-        return html.Div("Nenhuma máquina selecionada.", className="text-center text-muted p-3")
-
-    # Janela atual (pan/zoom/range-slider) com fallback
+    # Janela atual: se não houver relayout, usa período completo
     if relayoutData is None and store.get("tmin") and store.get("tmax"):
         x0 = pd.to_datetime(store["tmin"]).normalize()
         x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
@@ -388,7 +385,7 @@ def atualizar_cards(store, operador, data_str, relayoutData, equips_sel):
         card("Mecânica",           f"{soma_h('Parada Mecânica'):.2f}h", "#A52657"),
     ], justify="center")
 
-# Resumo por máquina (horas na janela visível)
+# Resumo por máquina (horas na janela visível; padrão = período completo)
 @app.callback(
     Output("resumo-maquinas-div", "children"),
     Input("store-prep", "data"),
@@ -398,13 +395,15 @@ def atualizar_cards(store, operador, data_str, relayoutData, equips_sel):
 )
 def resumo_maquinas(store, data_str, relayoutData, equips_sel):
     dff = pd.DataFrame(store.get("dff", []))
-    if dff.empty or not equips_sel:
-        return html.Div("Sem máquinas selecionadas.", className="text-muted")
+    if dff.empty:
+        return html.Div("Sem máquinas.", className="text-muted")
 
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+    equips_all = store.get("equip_all", [])
+    if not equips_sel:
+        equips_sel = equips_all
     dff = dff[dff["Equipamento"].isin(equips_sel)]
 
-    # Janela com fallback p/ todo período na 1ª carga
     if relayoutData is None and store.get("tmin") and store.get("tmax"):
         x0 = pd.to_datetime(store["tmin"]).normalize()
         x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
@@ -428,10 +427,7 @@ def resumo_maquinas(store, data_str, relayoutData, equips_sel):
         g.rename(columns={"Equipamento": "Equip.", "Horas": "Horas (janela)"}),
         striped=True, bordered=True, hover=True, className="table-sm mb-0"
     )
-    return html.Div([
-        html.H6("Resumo por máquina", className="mb-2"),
-        table
-    ])
+    return html.Div([html.H6("Resumo por máquina", className="mb-2"), table])
 
 # Tabela improdutivas (OPERADOR + JANELA VISÍVEL + MÁQUINAS SELECIONADAS)
 @app.callback(
@@ -448,27 +444,23 @@ def tabela_improdutivas(store, operador, data_str, relayoutData, equips_sel):
         return html.Div("Sem dados para o operador selecionado.", className="text-center text-muted p-2")
 
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
+    equips_all = store.get("equip_all", [])
+    if not equips_sel:
+        equips_sel = equips_all
+    dff = dff[dff["Equipamento"].isin(equips_sel)]
 
-    # aplica filtro de máquinas
-    if equips_sel:
-        dff = dff[dff["Equipamento"].isin(equips_sel)]
-    else:
-        return html.Div("Nenhuma máquina selecionada.", className="text-center text-muted p-2")
-
-    # Janela com fallback p/ todo período na 1ª carga
+    # Janela (padrão = período completo)
     if relayoutData is None and store.get("tmin") and store.get("tmax"):
         x0 = pd.to_datetime(store["tmin"]).normalize()
         x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
     else:
         x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
 
-    # recorte por janela
     dff["Inicio_clip"] = dff["Inicio"].clip(lower=x0)
     dff["Fim_clip"]    = dff["Fim"].clip(upper=x1)
     dff["Duracao Min Clip"] = (dff["Fim_clip"] - dff["Inicio_clip"]).dt.total_seconds() / 60.0
     win = dff[dff["Duracao Min Clip"] > 0].copy()
 
-    # apenas improdutivas
     alvo = {"Parada Mecânica", "Parada Gerenciável", "Parada Essencial", "Parada Improdutiva"}
     win = win[win["Tipo Parada"].isin(alvo)]
     if win.empty:
