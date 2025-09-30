@@ -14,7 +14,7 @@ SHEET   = "Plan1"
 # ===================== CARGA & LIMPEZA =====================
 df = pd.read_excel(ARQUIVO, sheet_name=SHEET)
 
-# Equipamento (agora também pode ser filtrado)
+# Equipamento (string amigável para filtrar/mostrar)
 df["Equipamento"] = df["Código Equipamento"].astype(str) + " - " + df["Descrição do Equipamento"]
 
 # Parsing
@@ -111,8 +111,8 @@ def janela_inicial_do_dia(data_str):
 
 def janela_visivel(data_str, relayoutData, tmin_fallback=None):
     """
-    Retorna (x0, x1) da janela atualmente visível no gráfico,
-    usando pan/zoom/range-slider se houver, ou [data 00:00, +24h] como fallback.
+    Retorna (x0, x1) da janela visível do gráfico.
+    Sem interação ainda → [data 00:00, +24h] ou tmin_fallback.
     """
     if data_str:
         base_day = pd.to_datetime(data_str).normalize()
@@ -126,16 +126,12 @@ def janela_visivel(data_str, relayoutData, tmin_fallback=None):
 
     if rd.get("xaxis.autorange", False):
         return x0, x1
-
     if "xaxis.range[0]" in rd and "xaxis.range[1]" in rd:
         return pd.to_datetime(rd["xaxis.range[0]"]), pd.to_datetime(rd["xaxis.range[1]"])
-
     if "xaxis.range" in rd and isinstance(rd["xaxis.range"], (list,tuple)) and len(rd["xaxis.range"]) == 2:
         return pd.to_datetime(rd["xaxis.range"][0]), pd.to_datetime(rd["xaxis.range"][1])
-
     if "xaxis.rangeslider.range[0]" in rd and "xaxis.rangeslider.range[1]" in rd:
         return pd.to_datetime(rd["xaxis.rangeslider.range[0]"]), pd.to_datetime(rd["xaxis.rangeslider.range[1]"])
-
     return x0, x1
 
 # ===================== APP =====================
@@ -174,8 +170,7 @@ app.layout = html.Div(style={"backgroundColor": "#f8f9fa", "padding": "20px"}, c
                 dbc.Col(dcc.Dropdown(
                     id="equipamentos-checklist",
                     options=[], value=[],
-                    multi=True, placeholder="Selecione as máquinas (padrão: todas)",
-                    maxHeight=250
+                    multi=True, placeholder="Selecione as máquinas (padrão: todas)"
                 ), md=8),
                 dbc.Col(html.Div(id="resumo-maquinas-div"), md=4)
             ], align="center"),
@@ -226,7 +221,7 @@ def preparar_dados(operador):
     tmax = str(dff["Fim"].max())    if not dff.empty else None
     return {"dff": dff_json, "tmin": tmin, "tmax": tmax}
 
-# === NOVO: opções/valor do filtro de máquinas (com base na JANELA VISÍVEL) ===
+# === Filtro de máquinas baseado na JANELA VISÍVEL (com fallback tmin→tmax na 1ª carga) ===
 @app.callback(
     Output("equipamentos-checklist", "options"),
     Output("equipamentos-checklist", "value"),
@@ -237,12 +232,18 @@ def preparar_dados(operador):
 )
 def atualizar_equipamentos(store, data_str, relayoutData, sel_prev):
     dff = pd.DataFrame(store.get("dff", []))
-    if dff.empty or not data_str:
+    if dff.empty:
         return [], []
+
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
 
-    # Máquinas que têm qualquer interseção com a JANELA VISÍVEL
-    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
+    # 1ª render (sem interação): usar todo o período do operador; depois, a janela visível
+    if relayoutData is None and store.get("tmin") and store.get("tmax"):
+        x0 = pd.to_datetime(store["tmin"]).normalize()
+        x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
+    else:
+        x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
+
     mask = (dff["Fim"] > x0) & (dff["Inicio"] < x1)
     usados = sorted(dff.loc[mask, "Equipamento"].dropna().unique().tolist())
     opts = [{"label": e, "value": e} for e in usados]
@@ -251,13 +252,11 @@ def atualizar_equipamentos(store, data_str, relayoutData, sel_prev):
     if sel_prev is None:
         return opts, usados  # 1ª render: todas
     inter = [v for v in (sel_prev or []) if v in usados]
-    # Se a janela mudou e nada da seleção antiga existe mais, volta pra todas
-    # (a menos que o usuário tenha limpado manualmente: sel_prev == [])
     if not inter and sel_prev != []:
-        inter = usados
+        inter = usados  # se janela mudou e esvaziou, volta pra todas (a menos que usuário tenha limpado)
     return opts, inter
 
-# Desenha figura (respeitando filtro de máquinas e mantendo pan/zoom)
+# Desenha figura (respeita máquinas e não reseta pan/zoom)
 @app.callback(
     Output("grafico-linha-tempo", "figure"),
     Input("store-prep", "data"),
@@ -275,7 +274,7 @@ def desenhar_fig(store, operador, data_str, equips_sel):
         fig.update_layout(title="Sem dados para exibir.", uirevision=f"op:{operador}")
         return fig
 
-    # aplica filtro de máquinas (se nenhum selecionado, fica vazio)
+    # aplica filtro de máquinas
     if equips_sel:
         dff = dff[dff["Equipamento"].isin(equips_sel)]
     else:
@@ -308,25 +307,31 @@ def desenhar_fig(store, operador, data_str, equips_sel):
         margin=dict(l=40, r=40, t=80, b=60), height=600,
         legend=dict(orientation="v", x=1.02, y=1),
         dragmode="pan",
-        uirevision=f"op:{operador}"   # mantém pan/zoom ao ligar/desligar máquinas
+        uirevision=f"op:{operador}"   # mantém pan/zoom ao alterar máquinas
     )
     fig.update_traces(marker=dict(line=dict(width=1, color="white")))
     fig.update_yaxes(autorange="reversed")
 
-    # divisores 00:00 (decorativo)
     add_divisores_de_dia(fig, store.get("tmin"), store.get("tmax"))
 
-    # range inicial pela data escolhida (apenas na troca de data/operador)
-    if data_str:
-        x0, x1 = janela_inicial_do_dia(data_str)
-        fig.update_xaxes(range=[x0, x1], autorange=False)
+    # Range inicial:
+    trig = ctx.triggered_id
+    if store.get("tmin") and store.get("tmax"):
+        if trig in (None, "store-prep", "operador-dropdown"):
+            # 1ª carga / troca de operador → todo período do operador
+            x0_full = pd.to_datetime(store["tmin"]).normalize()
+            x1_full = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
+            fig.update_xaxes(range=[x0_full, x1_full], autorange=False)
+    if trig == "data-dropdown" and data_str:
+        # se escolher uma data, focar no dia
+        x0_day, x1_day = janela_inicial_do_dia(data_str)
+        fig.update_xaxes(range=[x0_day, x1_day], autorange=False)
 
-    # slider + spikes
     fig.update_xaxes(rangeslider_visible=True, showspikes=True,
                      spikemode="across", spikecolor="#bbb", spikedash="dot")
     return fig
 
-# Cards do topo (batelada = janela visível) — respeitando máquinas selecionadas
+# Cards do topo (janela visível + máquinas selecionadas)
 @app.callback(
     Output("stats-div", "children"),
     Input("store-prep", "data"),
@@ -346,7 +351,12 @@ def atualizar_cards(store, operador, data_str, relayoutData, equips_sel):
     else:
         return html.Div("Nenhuma máquina selecionada.", className="text-center text-muted p-3")
 
-    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
+    # Janela atual (pan/zoom/range-slider) com fallback
+    if relayoutData is None and store.get("tmin") and store.get("tmax"):
+        x0 = pd.to_datetime(store["tmin"]).normalize()
+        x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
+    else:
+        x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
 
     dff["Inicio_clip"] = dff["Inicio"].clip(lower=x0)
     dff["Fim_clip"]    = dff["Fim"].clip(upper=x1)
@@ -388,13 +398,18 @@ def atualizar_cards(store, operador, data_str, relayoutData, equips_sel):
 )
 def resumo_maquinas(store, data_str, relayoutData, equips_sel):
     dff = pd.DataFrame(store.get("dff", []))
-    if dff.empty or not data_str or not equips_sel:
+    if dff.empty or not equips_sel:
         return html.Div("Sem máquinas selecionadas.", className="text-muted")
 
     dff["Inicio"] = pd.to_datetime(dff["Inicio"]); dff["Fim"] = pd.to_datetime(dff["Fim"])
     dff = dff[dff["Equipamento"].isin(equips_sel)]
 
-    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
+    # Janela com fallback p/ todo período na 1ª carga
+    if relayoutData is None and store.get("tmin") and store.get("tmax"):
+        x0 = pd.to_datetime(store["tmin"]).normalize()
+        x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
+    else:
+        x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
 
     dff["Inicio_clip"] = dff["Inicio"].clip(lower=x0)
     dff["Fim_clip"]    = dff["Fim"].clip(upper=x1)
@@ -440,8 +455,12 @@ def tabela_improdutivas(store, operador, data_str, relayoutData, equips_sel):
     else:
         return html.Div("Nenhuma máquina selecionada.", className="text-center text-muted p-2")
 
-    # janela atual
-    x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
+    # Janela com fallback p/ todo período na 1ª carga
+    if relayoutData is None and store.get("tmin") and store.get("tmax"):
+        x0 = pd.to_datetime(store["tmin"]).normalize()
+        x1 = pd.to_datetime(store["tmax"]).normalize() + pd.Timedelta(days=1)
+    else:
+        x0, x1 = janela_visivel(data_str, relayoutData, store.get("tmin"))
 
     # recorte por janela
     dff["Inicio_clip"] = dff["Inicio"].clip(lower=x0)
